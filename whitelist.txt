@@ -1,0 +1,82 @@
+# URL Whitelist Configuration
+# Add one URL or domain per line
+# Lines starting with # are comments
+# 
+# Examples:
+# google.com          (allows all Google subdomains)
+# youtube.com         (allows all YouTube subdomains)
+# https://github.com/specific-repo  (allows only this exact URL)
+
+# Add your allowed domains/URLs below:
+youtube.com
+google.com
+googlevideo.com
+ytimg.com
+gstatic.com
+googleapis.com
+ggpht.com
+
+# Netflix
+netflix.com
+nflximg.net
+nflxext.com
+nflxso.net
+nflxvideo.net
+
+# HBO / HBO Max
+hbo.com
+hbomax.com
+hbo.com
+hbogo.com
+hbonow.com
+
+# Disney+
+disney.com
+disneyplus.com
+disney-plus.net
+dssott.com
+disneystreaming.com
+
+# Hulu
+hulu.com
+hulustream.com
+
+# Amazon Prime Video
+amazon.com
+amazonvideo.com
+primevideo.com
+aiv-cdn.net
+
+# Paramount+
+paramountplus.com
+cbs.com
+cbsi.com
+cbsnews.com
+cbsstatic.com
+
+# Peacock
+peacocktv.com
+nbc.com
+nbcuni.com
+
+# Apple TV+
+apple.com
+apple.com
+tv.apple.com
+
+# Spotify (music)
+spotify.com
+spotifycdn.com
+scdn.co
+
+# Twitch
+twitch.tv
+twitchcdn.net
+
+# Vimeo
+vimeo.com
+vimeocdn.com
+
+# Dailymotion
+dailymotion.com
+dmcdn.net
