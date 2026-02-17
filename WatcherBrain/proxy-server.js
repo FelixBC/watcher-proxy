@@ -121,6 +121,18 @@ function logBlockedRequest(url, ip) {
     }
 }
 
+// Clear blocked-requests.log (called weekly)
+function clearBlockedRequestsLog() {
+    try {
+        if (fs.existsSync(CONFIG.LOG_FILE)) {
+            fs.writeFileSync(CONFIG.LOG_FILE, '', 'utf-8');
+            console.log('Blocked requests log cleared (weekly reset).');
+        }
+    } catch (error) {
+        console.error(`Error clearing log file: ${error.message}`);
+    }
+}
+
 // Read error page HTML
 let errorPageHtml = null;
 function getErrorPage() {
@@ -295,6 +307,10 @@ server.on('connect', (req, socket, head) => {
 setInterval(() => {
     loadWhitelist();
 }, 30000);
+
+// Clear blocked-requests.log every week (7 days)
+const ONE_WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+setInterval(clearBlockedRequestsLog, ONE_WEEK_MS);
 
 // Watch whitelist file for changes
 if (fs.existsSync(CONFIG.WHITELIST_FILE)) {

@@ -80,3 +80,27 @@ vimeocdn.com
 # Dailymotion
 dailymotion.com
 dmcdn.net
+
+# Lo de la empresa
+lotterypost.com
+nylottery.ny.gov
+floridalottery.com
+loteriasdominicanas.com
+konfyanslotto.com
+api.lotocompany.com
+nationlk.com
+
+# UltraViewer (remote desktop - allow all app/update/console traffic)
+ultraviewer.net
+update.ultraviewer.net
+console.ultraviewer.net
+
+chat.openai.com
+printers.apk.lol
+premierlotto.apk.lol
+
+
+
+
+# LottoCompany transform URLS so we need to add the main URL api.lotocompany for the dependent ones to work.
+# api.lotocompany.com/api/v1/sessions/params?domain=nationlk.com

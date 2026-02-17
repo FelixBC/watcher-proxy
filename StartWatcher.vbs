@@ -1,18 +1,18 @@
 Set WshShell = CreateObject("WScript.Shell")
 Set fso = CreateObject("Scripting.FileSystemObject")
 
-' Get the directory where this script is located
 ScriptDir = fso.GetParentFolderName(WScript.ScriptFullName)
 BrainDir = ScriptDir & "\WatcherBrain"
 
-' Check for bundled Node.js
-NodeExe = BrainDir & "\node\node.exe"
-If fso.FileExists(NodeExe) Then
-    ' Use bundled Node.js - run hidden (0 = hidden window)
-    WshShell.Run """" & NodeExe & """ """ & BrainDir & "\proxy-server.js""", 0, False
+' Brief wait for stability when run at logon
+WScript.Sleep 1500
+
+' Start node with no console window (PowerShell -WindowStyle Hidden)
+If fso.FileExists(BrainDir & "\node\node.exe") Then
+    NodeExe = BrainDir & "\node\node.exe"
+    WshShell.Run "powershell -WindowStyle Hidden -NoProfile -Command ""Start-Process -FilePath '" & Replace(NodeExe, "'", "''") & "' -ArgumentList 'proxy-server.js' -WorkingDirectory '" & Replace(BrainDir, "'", "''") & "' -WindowStyle Hidden""", 0, False
 Else
-    ' Use system Node.js - run hidden (0 = hidden window)
-    WshShell.Run "node """ & BrainDir & "\proxy-server.js""", 0, False
+    WshShell.Run "powershell -WindowStyle Hidden -NoProfile -Command ""Start-Process -FilePath 'node' -ArgumentList 'proxy-server.js' -WorkingDirectory '" & Replace(BrainDir, "'", "''") & "' -WindowStyle Hidden""", 0, False
 End If
 
 Set WshShell = Nothing
