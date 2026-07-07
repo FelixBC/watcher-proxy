@@ -75,6 +75,14 @@ function createDefaultWhitelist() {
     console.log('Created default whitelist.txt file');
 }
 
+// Check if hostname is an IP address (IPv4 or IPv6)
+function isIpAddress(hostname) {
+    if (!hostname) return false;
+    const v4 = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname);
+    const v6 = hostname.includes(':');
+    return v4 || v6;
+}
+
 // Check if URL is whitelisted
 function isWhitelisted(url) {
     try {
@@ -94,6 +102,9 @@ function isWhitelisted(url) {
             // If URL parsing fails, try to extract domain manually
             hostname = urlLower.replace(/^https?:\/\//, '').split('/')[0].split(':')[0];
         }
+
+        // Allow CONNECT to IP addresses (e.g. UltraViewer and other apps that connect by IP)
+        if (isIpAddress(hostname)) return true;
 
         // Check domain match (including subdomains)
         for (const domain of whitelist.domains) {
@@ -303,10 +314,10 @@ server.on('connect', (req, socket, head) => {
     });
 });
 
-// Reload whitelist periodically (every 30 seconds)
+// Reload whitelist periodically (every 60 sec; gentle on low-end PCs; watchFile still reloads on save)
 setInterval(() => {
     loadWhitelist();
-}, 30000);
+}, 60000);
 
 // Clear blocked-requests.log every week (7 days)
 const ONE_WEEK_MS = 7 * 24 * 60 * 60 * 1000;

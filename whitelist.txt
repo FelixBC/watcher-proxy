@@ -87,20 +87,30 @@ nylottery.ny.gov
 floridalottery.com
 loteriasdominicanas.com
 konfyanslotto.com
+konfyanslotto.net
 api.lotocompany.com
 nationlk.com
+# TinyMCE editor CDN (used by konfyanslotto POS)
+cdn.tiny.cloud
+cloud.tinymce.com
+sp.tinymce.com
 
-# UltraViewer (remote desktop - allow all app/update/console traffic)
+# UltraViewer (remote desktop - allow all so it does not crash when proxy is on)
 ultraviewer.net
+www.ultraviewer.net
 update.ultraviewer.net
 console.ultraviewer.net
+api.ultraviewer.net
+app.ultraviewer.net
+download.ultraviewer.net
 
 chat.openai.com
 printers.apk.lol
 premierlotto.apk.lol
 
-
-
+# Qpay
+qpay.tv
+player.qpay.tv
 
 # LottoCompany transform URLS so we need to add the main URL api.lotocompany for the dependent ones to work.
 # api.lotocompany.com/api/v1/sessions/params?domain=nationlk.com

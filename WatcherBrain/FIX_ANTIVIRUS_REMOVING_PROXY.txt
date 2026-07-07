@@ -1,0 +1,64 @@
+═══════════════════════════════════════════════════════════════
+  FIX: Antivirus removing the proxy (proxy stops working)
+  Give this to your clients / do this on each PC where Watcher is installed
+═══════════════════════════════════════════════════════════════
+
+WHY IT HAPPENS
+  Antivirus can treat the proxy (Node.js, scripts) as suspicious and
+  quarantine or delete files. Then the proxy stops until you fix it.
+
+BEST FIX – ADD THE FOLDER TO ANTIVIRUS EXCLUSIONS (recommended)
+  This keeps real-time protection ON and only excludes the Watcher folder.
+
+  • If the PC uses WINDOWS DEFENDER (default in Windows 10/11):
+    1. Open the Watcher folder, then open the WatcherBrain folder.
+    2. Right-click: AddWatcherToAntivirusExclusion.bat
+    3. Click "Run as administrator"
+    4. Click Yes if Windows asks.
+    5. Done. Defender will no longer remove the proxy files.
+
+  • If the PC uses MCAFEE:
+    Yes, McAfee can remove or quarantine the proxy files. Add the Watcher
+    folder (the parent of WatcherBrain) to McAfee exclusions:
+    1. Open the McAfee app (double-click the McAfee icon in the system tray or start menu).
+    2. Click "My Protection" in the left menu.
+    3. Click "Real-Time Scanning".
+    4. Find "Excluded Files" and click "Add file" or "Add folder".
+    5. Browse to and select the Watcher folder (the folder that contains
+       WatcherBrain, whitelist.txt, InstallWatcher.bat, etc.).
+    6. Click OK and save. McAfee will no longer scan or remove that folder.
+
+    When you run InstallWatcher.bat as Administrator, it adds Defender
+    exclusion and, if McAfee is detected, reminds you to add the folder
+    in McAfee too (same steps above).
+
+  • If the PC uses ANOTHER ANTIVIRUS (Norton, Kaspersky, Avast, etc.):
+    1. Open the antivirus program.
+    2. Find settings for "Exclusions", "Whitelist", or "Allowed files/folders".
+    3. Add the Watcher folder (the one that contains WatcherBrain).
+    4. Save. The antivirus will ignore that folder.
+
+  Do this ONCE per PC. If someone turns the antivirus back on later,
+  the exclusion usually stays; if the proxy stops again, run the step
+  again or re-add the folder.
+
+  If they INSTALL A DIFFERENT ANTIVIRUS later (Norton, Kaspersky, etc.),
+  that program has its own exclusion list – it does NOT inherit from
+  Windows Defender. They must add the Watcher folder to the new
+  antivirus's exclusions as well.
+
+ALTERNATIVE – TURN OFF REAL-TIME PROTECTION (not recommended)
+  You can turn off real-time protection so nothing gets removed, but
+  that weakens protection for the whole PC. Only do this if the client
+  accepts the risk and you cannot use exclusions (e.g. locked-down AV).
+  In Windows Defender: Settings → Privacy & Security → Windows Security
+  → Virus & threat protection → Manage settings → Real-time protection OFF.
+
+SUMMARY FOR YOUR CLIENT
+  "On every PC where the proxy is installed: open Watcher, then WatcherBrain.
+   Right-click AddWatcherToAntivirusExclusion.bat, choose Run as
+   administrator. That adds Windows Defender exclusion (and if McAfee is
+   installed, add the Watcher folder in McAfee too: My Protection →
+   Real-Time Scanning → Excluded Files)."
+
+═══════════════════════════════════════════════════════════════

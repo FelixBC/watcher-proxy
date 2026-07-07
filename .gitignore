@@ -1,5 +1,8 @@
-﻿node/
+node/
+WatcherBrain/node/
 *.log
 *.zip
 Watcher.zip
 blocked-requests.log
+watchdog_loop.pid
+last_spool_cleanup_day.txt
