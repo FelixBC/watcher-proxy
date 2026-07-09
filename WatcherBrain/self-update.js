@@ -45,6 +45,16 @@ function log(message) {
     console.log(message);
 }
 
+// execSync's default error.message is just "Command failed: <cmd>" with no
+// indication of WHY - the actual reason lives in e.stderr/e.stdout, which
+// are only populated if stdio wasn't set to 'ignore' on that call.
+function describeError(e) {
+    const stderr = e.stderr ? e.stderr.toString().trim() : '';
+    const stdout = e.stdout ? e.stdout.toString().trim() : '';
+    const detail = [stderr, stdout].filter(Boolean).join(' | ');
+    return detail ? `${e.message} — ${detail}` : e.message;
+}
+
 // Backup folders are timestamped (WatcherBrain/_backup_<version>_<ts>), so
 // they can't be listed in PROTECTED_RELATIVE_PATHS by exact name. Without
 // this, copyTree(ROOT_DIR, backupDir) would walk into the backup directory
@@ -80,33 +90,31 @@ function copyTree(srcDir, destDir, relativeBase) {
     }
 }
 
+// stdio left as default (piped) rather than 'ignore' on every call below,
+// deliberately: an earlier version used 'ignore' throughout and a real
+// failure on a real VM came back as a totally empty error message,
+// impossible to diagnose. Piped stdio means a thrown error carries
+// e.stderr/e.stdout, which main()'s catch block now logs.
+
 function flipToNormalInternet() {
     // GOLDEN RULE — see file header. Done before anything else touches the
     // proxy process, mirroring WatchdogLoop.ps1's unplug ordering exactly.
     execSync(
         'powershell -NoProfile -NonInteractive -Command "' +
         'Set-ItemProperty -Path \'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\' -Name ProxyEnable -Value 0 -Type DWord -ErrorAction SilentlyContinue; ' +
-        'Remove-ItemProperty -Path \'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\' -Name ProxyServer -ErrorAction SilentlyContinue"',
-        { stdio: 'ignore' }
+        'Remove-ItemProperty -Path \'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\' -Name ProxyServer -ErrorAction SilentlyContinue"'
     );
 }
 
 function stopProxyAndWatchdog() {
     execSync(
-        `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${path.join(BRAIN_DIR, 'StopWatcherProcesses.ps1')}"`,
-        { stdio: 'ignore' }
+        `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${path.join(BRAIN_DIR, 'StopWatcherProcesses.ps1')}"`
     );
 }
 
 function startProxyAndWatchdog() {
-    execSync(
-        `wscript.exe "${path.join(BRAIN_DIR, 'RunWatchdogLoopHidden.vbs')}"`,
-        { stdio: 'ignore' }
-    );
-    execSync(
-        `wscript.exe "${path.join(BRAIN_DIR, 'StartWatcher.vbs')}" nocheck`,
-        { stdio: 'ignore' }
-    );
+    execSync(`wscript.exe "${path.join(BRAIN_DIR, 'RunWatchdogLoopHidden.vbs')}"`);
+    execSync(`wscript.exe "${path.join(BRAIN_DIR, 'StartWatcher.vbs')}" nocheck`);
 }
 
 function checkTcpOpenSync(host, port, timeoutMs) {
@@ -149,7 +157,7 @@ async function main() {
     try {
         remoteVersion = (await getText(REPO_RAW_VERSION_URL, 10000)).trim();
     } catch (e) {
-        log(`Update check failed (no local changes made): ${e.message}`);
+        log(`Update check failed (no local changes made): ${describeError(e)}`);
         return;
     }
 
@@ -174,8 +182,7 @@ async function main() {
 
         fs.mkdirSync(tempExtract, { recursive: true });
         execSync(
-            `powershell -NoProfile -NonInteractive -Command "Expand-Archive -Path '${tempZip}' -DestinationPath '${tempExtract}' -Force"`,
-            { stdio: 'ignore' }
+            `powershell -NoProfile -NonInteractive -Command "Expand-Archive -Path '${tempZip}' -DestinationPath '${tempExtract}' -Force"`
         );
 
         const extractedRoot = fs
@@ -205,7 +212,7 @@ async function main() {
 
         log(`Update to ${remoteVersion} successful and healthy.`);
     } catch (e) {
-        log(`Update failed with an error, attempting rollback: ${e.message}`);
+        log(`Update failed with an error, attempting rollback: ${describeError(e)}`);
         try {
             stopProxyAndWatchdog();
             restoreBackup(backupDir);
