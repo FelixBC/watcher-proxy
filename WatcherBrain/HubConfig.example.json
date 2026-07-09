@@ -1,0 +1,4 @@
+{
+  "HubUrl": "https://watcher-fleet.vercel.app",
+  "EnrollmentSecret": "REPLACE_BEFORE_PACKAGING_NEVER_COMMIT"
+}

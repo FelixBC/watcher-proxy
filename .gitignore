@@ -6,3 +6,14 @@ Watcher.zip
 blocked-requests.log
 watchdog_loop.pid
 last_spool_cleanup_day.txt
+
+# Fleet dashboard secrets/state — never committed. HubConfig.json holds the
+# enrollment secret (repo is PUBLIC); hub-credential.json is the per-machine
+# credential issued back on registration. See WatcherBrain/HubConfig.example.json.
+WatcherBrain/HubConfig.json
+WatcherBrain/hub-credential.json
+WatcherBrain/unplugged.flag
+WatcherBrain/whitelist-version.txt
+WatcherBrain/poll-log-cursor.txt
+WatcherBrain/update.log
+WatcherBrain/_backup_*/
