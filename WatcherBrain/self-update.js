@@ -13,7 +13,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { execSync } = require('child_process');
+const { execFileSync } = require('child_process');
 
 const { BRAIN_DIR, getText, downloadFile } = require('./hub-client');
 
@@ -96,33 +96,44 @@ function copyTree(srcDir, destDir, relativeBase) {
 // impossible to diagnose. Piped stdio means a thrown error carries
 // e.stderr/e.stdout, which main()'s catch block now logs.
 
+// execFileSync with argv arrays throughout this file, deliberately, NOT
+// execSync with a concatenated string. Confirmed by hand on a real VM: the
+// string form goes through cmd.exe's own shell parsing before powershell.exe
+// ever sees it, and a command with this much nested quoting (single quotes
+// for the registry path inside a double-quoted -Command block) came back
+// with status 1 and completely empty stdout/stderr - cmd.exe mangled it
+// before PowerShell could run at all. The array form bypasses shell string
+// parsing entirely; the same command succeeded immediately once switched.
+
 function flipToNormalInternet() {
     // GOLDEN RULE — see file header. Done before anything else touches the
     // proxy process, mirroring WatchdogLoop.ps1's unplug ordering exactly.
-    execSync(
-        'powershell -NoProfile -NonInteractive -Command "' +
-        'Set-ItemProperty -Path \'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\' -Name ProxyEnable -Value 0 -Type DWord -ErrorAction SilentlyContinue; ' +
-        'Remove-ItemProperty -Path \'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\' -Name ProxyServer -ErrorAction SilentlyContinue"'
-    );
+    execFileSync('powershell.exe', [
+        '-NoProfile', '-NonInteractive', '-Command',
+        "Set-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' -Name ProxyEnable -Value 0 -Type DWord -ErrorAction SilentlyContinue; " +
+        "Remove-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' -Name ProxyServer -ErrorAction SilentlyContinue"
+    ]);
 }
 
 function stopProxyAndWatchdog() {
-    execSync(
-        `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${path.join(BRAIN_DIR, 'StopWatcherProcesses.ps1')}"`
-    );
+    execFileSync('powershell.exe', [
+        '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+        '-File', path.join(BRAIN_DIR, 'StopWatcherProcesses.ps1')
+    ]);
 }
 
 function startProxyAndWatchdog() {
-    execSync(`wscript.exe "${path.join(BRAIN_DIR, 'RunWatchdogLoopHidden.vbs')}"`);
-    execSync(`wscript.exe "${path.join(BRAIN_DIR, 'StartWatcher.vbs')}" nocheck`);
+    execFileSync('wscript.exe', [path.join(BRAIN_DIR, 'RunWatchdogLoopHidden.vbs')]);
+    execFileSync('wscript.exe', [path.join(BRAIN_DIR, 'StartWatcher.vbs'), 'nocheck']);
 }
 
 function checkTcpOpenSync(host, port, timeoutMs) {
     try {
-        execSync(
-            `powershell -NoProfile -NonInteractive -File "${path.join(BRAIN_DIR, 'CheckPort.ps1')}" -Port ${port} -TimeoutMs ${timeoutMs}`,
-            { stdio: 'ignore' }
-        );
+        execFileSync('powershell.exe', [
+            '-NoProfile', '-NonInteractive',
+            '-File', path.join(BRAIN_DIR, 'CheckPort.ps1'),
+            '-Port', String(port), '-TimeoutMs', String(timeoutMs)
+        ], { stdio: 'ignore' });
         return true; // CheckPort.ps1 exits 0 when the port is open
     } catch (e) {
         return false;
@@ -181,9 +192,10 @@ async function main() {
         stopProxyAndWatchdog();
 
         fs.mkdirSync(tempExtract, { recursive: true });
-        execSync(
-            `powershell -NoProfile -NonInteractive -Command "Expand-Archive -Path '${tempZip}' -DestinationPath '${tempExtract}' -Force"`
-        );
+        execFileSync('powershell.exe', [
+            '-NoProfile', '-NonInteractive', '-Command',
+            `Expand-Archive -Path '${tempZip}' -DestinationPath '${tempExtract}' -Force`
+        ]);
 
         const extractedRoot = fs
             .readdirSync(tempExtract, { withFileTypes: true })
