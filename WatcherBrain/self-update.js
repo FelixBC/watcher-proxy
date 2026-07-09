@@ -119,14 +119,14 @@ function flipToNormalInternet() {
     // which never had this problem because they were never rewritten as
     // PowerShell in the first place.
     execFileSync('reg.exe', ['add', REG_KEY, '/v', 'ProxyEnable', '/t', 'REG_DWORD', '/d', '0', '/f']);
+    // Best-effort: the only goal is "make sure ProxyServer isn't set." If
+    // it's already gone (the common case, since this often re-runs after a
+    // previous pass already cleared it), that goal is met either way -
+    // same intent as PowerShell's -ErrorAction SilentlyContinue. Swallow
+    // unconditionally rather than pattern-match reg.exe's error text.
     try {
         execFileSync('reg.exe', ['delete', REG_KEY, '/v', 'ProxyServer', '/f']);
-    } catch (e) {
-        // "value not found" is fine here - it means there was nothing to
-        // remove, same intent as PowerShell's -ErrorAction SilentlyContinue.
-        const msg = (e.stderr || '').toString();
-        if (!/unable to find/i.test(msg)) throw e;
-    }
+    } catch (e) { /* fine either way */ }
 }
 
 function stopProxyAndWatchdog() {
