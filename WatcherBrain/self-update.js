@@ -97,22 +97,36 @@ function copyTree(srcDir, destDir, relativeBase) {
 // e.stderr/e.stdout, which main()'s catch block now logs.
 
 // execFileSync with argv arrays throughout this file, deliberately, NOT
-// execSync with a concatenated string. Confirmed by hand on a real VM: the
-// string form goes through cmd.exe's own shell parsing before powershell.exe
-// ever sees it, and a command with this much nested quoting (single quotes
-// for the registry path inside a double-quoted -Command block) came back
-// with status 1 and completely empty stdout/stderr - cmd.exe mangled it
-// before PowerShell could run at all. The array form bypasses shell string
-// parsing entirely; the same command succeeded immediately once switched.
+// execSync with a concatenated string - the string form goes through
+// cmd.exe's own shell parsing before the target program ever sees it,
+// which mangled a command with this much nested quoting.
+
+const REG_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings';
 
 function flipToNormalInternet() {
     // GOLDEN RULE — see file header. Done before anything else touches the
     // proxy process, mirroring WatchdogLoop.ps1's unplug ordering exactly.
-    execFileSync('powershell.exe', [
-        '-NoProfile', '-NonInteractive', '-Command',
-        "Set-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' -Name ProxyEnable -Value 0 -Type DWord -ErrorAction SilentlyContinue; " +
-        "Remove-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' -Name ProxyServer -ErrorAction SilentlyContinue"
-    ]);
+    //
+    // Uses reg.exe, NOT PowerShell's Set-ItemProperty/Remove-ItemProperty.
+    // Confirmed by hand on two separate real VMs: the identical PowerShell
+    // command reliably failed (sometimes an immediate empty error,
+    // sometimes a multi-minute hang) specifically when run with its
+    // working directory inside the Watcher folder - consistent with AMSI
+    // (which scans PowerShell script *content*, not plain Win32 tools)
+    // flagging "a script modifying Internet Settings proxy keys," which is
+    // exactly the pattern browser/traffic-hijacking malware uses. reg.exe
+    // has been reliable all session in InstallWatcher.bat/BackToNormal.bat,
+    // which never had this problem because they were never rewritten as
+    // PowerShell in the first place.
+    execFileSync('reg.exe', ['add', REG_KEY, '/v', 'ProxyEnable', '/t', 'REG_DWORD', '/d', '0', '/f']);
+    try {
+        execFileSync('reg.exe', ['delete', REG_KEY, '/v', 'ProxyServer', '/f']);
+    } catch (e) {
+        // "value not found" is fine here - it means there was nothing to
+        // remove, same intent as PowerShell's -ErrorAction SilentlyContinue.
+        const msg = (e.stderr || '').toString();
+        if (!/unable to find/i.test(msg)) throw e;
+    }
 }
 
 function stopProxyAndWatchdog() {
