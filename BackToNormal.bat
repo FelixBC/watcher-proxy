@@ -61,6 +61,12 @@ schtasks /end /tn "Watcher Proxy Loop" >nul 2>&1
 schtasks /change /tn "Watcher Proxy Loop" /disable >nul 2>&1
 schtasks /end /tn "Watcher Proxy Safety Net" >nul 2>&1
 schtasks /change /tn "Watcher Proxy Safety Net" /disable >nul 2>&1
+REM Stop the supervisor service too - it would otherwise keep asking Task
+REM Scheduler to relaunch "Watcher Proxy Loop" every 5 sec, fighting this
+REM uninstall. Needs admin, same as the task deletions below, so only
+REM attempted here as a best-effort; the ADMIN_CLEANUP block does the real
+REM uninstall.
+net stop WatcherProxySupervisor >nul 2>&1
 
 REM If we were invoked with "admin" arg, run admin-only cleanup and exit.
 if /I "%~1"=="admin" goto :ADMIN_CLEANUP
@@ -84,10 +90,15 @@ goto :DONE
 
 :ADMIN_CLEANUP
 REM Admin-only removal (does NOT touch HKCU of the admin account beyond what already happened)
-echo [ADMIN] Removing tasks and All Users shortcut...
+echo [ADMIN] Removing tasks, service, and All Users shortcut...
 set "BRAIN_DIR=%~dp0WatcherBrain"
 REM Reset WinHTTP proxy as well (some apps use it)
 netsh winhttp reset proxy >nul 2>&1
+
+if exist "%BRAIN_DIR%\winsw\WatcherProxySupervisor.exe" (
+    "%BRAIN_DIR%\winsw\WatcherProxySupervisor.exe" stop >nul 2>&1
+    "%BRAIN_DIR%\winsw\WatcherProxySupervisor.exe" uninstall >nul 2>&1
+)
 
 schtasks /delete /tn "URL Whitelist Proxy" /f >nul 2>&1
 schtasks /delete /tn "Watcher Proxy Watchdog" /f >nul 2>&1

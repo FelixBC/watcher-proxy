@@ -19,6 +19,7 @@ Stop-ByCommandLineMatch (Join-Path $brainDir 'WatchdogLoop.ps1')
 Stop-ByCommandLineMatch (Join-Path $brainDir 'SetProxyByAvailability.ps1')
 Stop-ByCommandLineMatch (Join-Path $brainDir 'CheckAndStartProxy.ps1')
 Stop-ByCommandLineMatch (Join-Path $brainDir 'CheckPort.ps1')
+Stop-ByCommandLineMatch (Join-Path $brainDir 'SupervisorService.ps1')
 
 # Stop VBS launchers if running
 Stop-ByCommandLineMatch (Join-Path $brainDir 'RunWatchdogLoopHidden.vbs')
