@@ -1,36 +1,35 @@
-# Registers the two independent recovery layers on top of the fast 5-second
-# WatchdogLoop.ps1 (layer 1). See docs/plans/0001-fleet-dashboard.md for the
-# full reasoning; summary:
+# Registers the recovery layers on top of the fast 5-second WatchdogLoop.ps1
+# (layer 1). See docs/plans/0001-fleet-dashboard.md for the full reasoning
+# and the real VM testing behind this; summary:
 #
 #   Layer 1 (existing, unchanged): WatchdogLoop.ps1, a persistent process,
-#     checks every 5 sec. Fast, but it IS a process - it can be killed.
+#     checks every 5 sec. Fast, but it IS a process - it can be killed. Its
+#     scheduled task runs as LogonType=InteractiveToken (the actual logged-in
+#     user), which matters: it's what lets it correctly read/write that
+#     user's own HKCU proxy settings.
 #
-#   Layer 2 (this script): the "Watcher Proxy Loop" task itself gets a
-#     native Task Scheduler restart-on-failure policy. If the layer-1
-#     PROCESS dies for any reason (crash, antivirus, someone killing it in
-#     Task Manager), the Scheduler SERVICE - not our code - relaunches it.
-#     Also removes the default 72-hour execution time limit, which would
-#     otherwise silently kill a long-running watchdog on a machine that
-#     just stays logged in for days (no crash involved at all).
-#
-#     IMPORTANT, confirmed by hand on a real VM: this ONLY works if the
-#     task's Action IS the long-running process itself (powershell.exe
-#     running WatchdogLoop.ps1 directly). An earlier version launched it
-#     via a detached "wscript.exe RunWatchdogLoopHidden.vbs" wrapper -
-#     Task Scheduler considered the task "successfully completed" the
-#     instant that launcher script returned, and had no ongoing
-#     relationship to the background process it spawned. Killing that
-#     process was invisible to Task Scheduler; RestartOnFailure never
-#     fired. Layer 3 alone (below) caught it in that version - which is
-#     exactly why layer 3 exists independently of layer 2, not merely as
-#     a backup to it.
+#   Layer 2 - RETIRED. Used to be a native Task Scheduler
+#     RestartOnFailure policy on the "Watcher Proxy Loop" task itself.
+#     Confirmed by hand on a real VM this session that it does NOT reliably
+#     fire in practice. Replaced by the WatcherProxySupervisor Windows
+#     Service (see InstallWatcherService.ps1) - SCM's own Recovery policy is
+#     purpose-built for exactly this and, unlike Task Scheduler here, is
+#     core Windows infrastructure every service on the machine depends on.
+#     That service deliberately does NOT run WatchdogLoop.ps1 or touch the
+#     registry itself - also confirmed by hand this session that a
+#     LocalSystem-run service writes to ITS OWN profile's HKCU, not the
+#     logged-in user's, so it can't correctly flip that user's actual proxy
+#     setting. Its only job is `schtasks /run` on Layer 1's task, which Task
+#     Scheduler already knows how to launch in the right user session.
 #
 #   Layer 3 (this script): a second, separate task with NO persistent
 #     process - Windows fires it directly every 1 minute. It doesn't
 #     exist except for the instant it runs, so it can't be "killed" the
 #     way a running program can. It both restores normal internet AND
 #     tries to restart the proxy, so it's a real second attempt at
-#     recovery, not just a safety check.
+#     recovery, not just a safety check. Also now checks that the
+#     WatcherProxySupervisor service itself is running, as a secondary
+#     check on top of what SCM's own Recovery policy already does.
 #
 # IMPORTANT: this deliberately uses schtasks.exe (via raw Task Scheduler XML)
 # instead of the PowerShell ScheduledTasks module (Register-ScheduledTask /
@@ -74,5 +73,14 @@ $safetyOk = Install-TaskFromTemplate -TaskName "Watcher Proxy Safety Net" -Templ
 if ($loopOk) { schtasks.exe /run /tn "Watcher Proxy Loop" | Out-Null }
 if ($safetyOk) { schtasks.exe /run /tn "Watcher Proxy Safety Net" | Out-Null }
 
-if (-not ($loopOk -and $safetyOk)) { exit 1 }
+# Layer 2's replacement - see header comment above for why this is a
+# separate service rather than a policy on the Layer 1 task.
+$serviceScript = Join-Path $BrainDir "InstallWatcherService.ps1"
+$serviceOk = $true
+if (Test-Path $serviceScript) {
+    & $serviceScript -BrainDir $BrainDir
+    $serviceOk = ($LASTEXITCODE -eq 0)
+}
+
+if (-not ($loopOk -and $safetyOk -and $serviceOk)) { exit 1 }
 exit 0

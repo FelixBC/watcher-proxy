@@ -199,7 +199,11 @@ async function main() {
     const tempExtract = path.join(os.tmpdir(), `watcher-proxy-update-extract-${Date.now()}`);
 
     try {
-        await downloadFile(REPO_ZIP_URL, tempZip, 60000);
+        log(`Starting download of ${REPO_ZIP_URL} to ${tempZip}`);
+        await downloadFile(REPO_ZIP_URL, tempZip, 60000, (event, detail) => {
+            log(`downloadFile: ${event} ${JSON.stringify(detail)}`);
+        });
+        log('Download finished.');
 
         // GOLDEN RULE: normal internet before the proxy is touched.
         flipToNormalInternet();
@@ -251,6 +255,28 @@ async function main() {
         try { fs.rmSync(tempExtract, { recursive: true, force: true }); } catch (e) {}
     }
 }
+
+// A prior investigation found this process dying silently mid-update with
+// no JS error anywhere and a non-standard exit code (-1, not the usual
+// uncaught-exception code of 1) — consistent with something that never
+// reaches a normal catch block: an unhandled 'error' event, a native crash,
+// or the process being killed by something external (antivirus real-time
+// protection is a real candidate, since the temp zip/extract dirs below
+// live in %TEMP%, outside the Defender exclusion InstallWatcher.bat adds
+// for the WatcherBrain folder itself). These handlers exist purely to make
+// sure that if it happens again, update.log has SOMETHING rather than
+// nothing to diagnose from.
+process.on('uncaughtException', (e) => {
+    log(`FATAL uncaughtException: ${e && e.stack ? e.stack : e}`);
+    process.exit(1);
+});
+process.on('unhandledRejection', (e) => {
+    log(`FATAL unhandledRejection: ${e && e.stack ? e.stack : e}`);
+    process.exit(1);
+});
+process.on('exit', (code) => {
+    log(`Process exiting with code ${code}`);
+});
 
 if (require.main === module) {
     main();

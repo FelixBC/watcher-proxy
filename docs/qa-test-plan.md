@@ -85,6 +85,70 @@ registry-flip step).
 - ❌ Self-update racing with the watchdog or Safety Net simultaneously trying
   to restart the proxy — possible double-start or state confusion?
 
+## F — Multi-user PCs (admin installer account ≠ worker "banca" account)
+
+Felix flagged this: real terminals often have TWO Windows accounts — an
+admin account (used to install) and a separate limited "banca" account the
+actual worker logs into to sell. Since Watcher's proxy toggling is all
+per-user (`HKCU`), this interacts directly with the Windows Service /
+registry-hive findings from this session.
+
+- ✅ **Found and fixed a real bug this session**: the watchdog tasks'
+  `<Principal>` had no explicit user, and Windows Task Scheduler silently
+  bakes in the SID of whoever ran the installer as the task's specific
+  run-as identity — confirmed by hand (`schtasks /query .../xml` showed
+  Administrator's exact SID). On a two-account PC, this would bind the
+  watchdog to the admin account; `InteractiveToken` requires that *specific*
+  user to have an active session, so the task could fail to start entirely
+  during the banca worker's own session — meaning no filtering/protection
+  while the terminal is actually in use. Fixed by binding `<Principal>` to
+  `GroupId = S-1-5-32-545` (`BUILTIN\Users`) instead, both in the task XML
+  templates and `RegisterProxyLogonTask.ps1`. Re-verified the fix actually
+  took effect in the real registered task's XML (shows `GroupId`, not a
+  baked-in SID) after re-running `RegisterWatchdogTasks.ps1`.
+- ✅ **Full live test completed and PASSED.** SSH alone was confirmed
+  insufficient (a banca SSH login created no WTS session at all — didn't
+  even show in `query user`). RDP `+auth-only` mode authenticates but
+  disconnects before a session forms — also confirmed insufficient. What
+  actually worked: booted the VM with a VNC console attached
+  (`-vnc 127.0.0.1:1`) and used `vncdotool` to drive a genuine interactive
+  logon as a second local user ("banca") at the actual console — logged off
+  Administrator, switched users at the LogonUI screen, typed banca's
+  credentials. Confirmed via `query user`: banca got a real, distinct
+  console session (ID 2, separate from Administrator's ID 1). Then, the
+  real proof: `WatchdogLoop.ps1`'s process owner was checked via
+  `Win32_Process.GetOwner()` and came back as `WATCHER-TEST\banca` — the
+  `GroupId=BUILTIN\Users` fix correctly fired the task for a completely
+  different, non-installer account. Also confirmed banca's OWN registry
+  hive (`HKEY_USERS\<banca's SID>`) had its `ProxyEnable` value actively
+  managed, not Administrator's — the whole mechanism operates correctly
+  end-to-end for the actual worker account, not just the admin who installs
+  it. Test user and profile removed afterward.
+- ❌ What happens on a PC where the banca user has no admin rights at all —
+  confirm `LeastPrivilege`/`RunLevel` on the fixed tasks doesn't require
+  elevation the worker account wouldn't have.
+- ⚠️ **Fast user switching / two users at once — attempted, inconclusive on
+  this VM, real structural finding.** Logged Administrator in at the console,
+  confirmed her `WatchdogLoop.ps1` was already running (PID 596), then used
+  Ctrl-Alt-Del → "Switch User" (deliberately not "Sign out") to bring banca
+  in without logging Administrator off first. Real finding: **Windows
+  Server without the Remote Desktop Session Host role does not support true
+  concurrent local sessions at all** — "Switch User" silently logged
+  Administrator off completely (her session vanished from `qwinsta`
+  entirely, not left running in the background as a "Disc" state the way it
+  would on Windows 10/11). Confirmed the hand-off itself is clean — no
+  orphaned/duplicate `WatchdogLoop.ps1` left behind from Administrator's
+  session, only banca's new one (PID 3588). But **the actual question this
+  test exists to answer — does the watchdog run twice and fight over port
+  8080 when two people are genuinely logged in simultaneously — was never
+  actually exercised**, because this VM's OS structurally can't produce that
+  condition. Real terminals almost certainly run Windows 10/11, which
+  supports genuine concurrent Fast User Switching out of the box, no RDS
+  license needed. 🔺 **Priority for next session**: re-run this exact test
+  on a Windows 10/11 VM or real hardware, where concurrent sessions are
+  actually possible. Still a completely open question, not a confirmed
+  pass.
+
 ---
 *Update this file directly as items move from ❌/⚠️ to ✅. If a new edge case
 occurs to you (or Felix) mid-session, add it here immediately rather than

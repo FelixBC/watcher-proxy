@@ -58,6 +58,20 @@ if (-not (Test-WatchdogLoopRunning)) {
         -WindowStyle Hidden
 }
 
+# Secondary check on top of SCM's own Recovery policy (which supervises this
+# service - see InstallWatcherService.ps1): if the WatcherProxySupervisor
+# service itself somehow isn't running, this 1-min task tries to start it
+# too. Genuine defense in depth, not a duplicate of the check above - this
+# targets the service that watches Layer 1, not Layer 1 itself.
+try {
+    $svc = Get-Service -Name 'WatcherProxySupervisor' -ErrorAction Stop
+    if ($svc.Status -ne 'Running') {
+        Start-Service -Name 'WatcherProxySupervisor' -ErrorAction SilentlyContinue
+    }
+} catch {
+    # Service not installed on this machine (e.g. mid-rollout) - nothing to do.
+}
+
 # Use 2s timeout; TcpClient.Connect() with no timeout blocks ~21s when nothing is listening (Windows TCP retransmits).
 function Test-ProxyListening {
     $timeoutMs = 2000

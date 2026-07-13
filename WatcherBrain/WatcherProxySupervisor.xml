@@ -1,0 +1,11 @@
+<service>
+  <id>WatcherProxySupervisor</id>
+  <name>Watcher Proxy Supervisor</name>
+  <description>Supervises the Watcher Proxy Loop scheduled task and asks Task Scheduler to relaunch it if it dies. Runs as LocalSystem - never touches the registry directly (see SupervisorService.ps1 for why).</description>
+  <executable>powershell.exe</executable>
+  <arguments>-NoProfile -ExecutionPolicy Bypass -File "__BRAIN_DIR__\SupervisorService.ps1"</arguments>
+  <log mode="roll-by-size">
+    <sizeThreshold>1024</sizeThreshold>
+    <keepFiles>2</keepFiles>
+  </log>
+</service>

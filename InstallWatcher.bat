@@ -83,9 +83,9 @@ REM reasoning. Only BackToNormal.bat removes these.
 powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%BRAIN_DIR%\RegisterWatchdogTasks.ps1" -BrainDir "%BRAIN_DIR%" >nul 2>&1
 if %ERRORLEVEL% EQU 0 (
     echo        [OK] If proxy dies: normal internet within 5 sec, proxy auto-restarts
-    echo        [OK] If the watchdog itself dies: Windows relaunches it within 1 min ^(or run WatcherBrain\RestoreInternetNow.bat^)
+    echo        [OK] If the watchdog itself dies: a Windows Service relaunches it within 5 sec ^(or run WatcherBrain\RestoreInternetNow.bat^)
 ) else (
-    echo        [WARNING] Watchdog tasks may not have been created correctly
+    echo        [WARNING] Watchdog tasks/service may not have been created correctly
 )
 
 REM On resume from sleep: check proxy and sync settings so wake is smooth (no 2-min wait).
