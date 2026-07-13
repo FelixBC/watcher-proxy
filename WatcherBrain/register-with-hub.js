@@ -6,8 +6,23 @@
 'use strict';
 
 const os = require('os');
+const fs = require('fs');
+const path = require('path');
 const { execFileSync } = require('child_process');
 const { readHubConfig, readCredential, writeCredential, postJson } = require('./hub-client');
+
+// Optional friendly name + zone chosen at install (popup writes these next to
+// the install root, one level up from WatcherBrain). Blank/missing = fall back
+// to the Windows hostname on the dashboard side.
+function readTrimmedFile(filePath) {
+    try {
+        if (!fs.existsSync(filePath)) return null;
+        const v = fs.readFileSync(filePath, 'utf-8').replace(/^﻿/, '').trim();
+        return v.length > 0 ? v : null;
+    } catch (e) {
+        return null;
+    }
+}
 
 // Stable per-PC fingerprint so a reinstall re-claims this machine's existing
 // dashboard row instead of creating a duplicate ghost. Windows MachineGuid
@@ -37,11 +52,15 @@ async function registerIfNeeded() {
     const config = readHubConfig();
     const label = `${os.hostname()}`;
     const hardwareId = getHardwareId();
+    const customName = readTrimmedFile(path.join(__dirname, '..', 'machine-name.txt'));
+    const zone = readTrimmedFile(path.join(__dirname, '..', 'machine-zone.txt'));
 
     const result = await postJson(config.HubUrl, '/api/agent/register', {
         enrollment_secret: config.EnrollmentSecret,
         label,
         hardware_id: hardwareId,
+        custom_name: customName,
+        zone,
     });
 
     if (!result || !result.machine_id || !result.credential) {
