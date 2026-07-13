@@ -48,16 +48,29 @@ function checkTcpOpen(host, port, timeoutMs) {
 }
 
 async function checkInternetReachable() {
-    // Deliberately independent of the hub and of the local proxy: a raw
-    // HTTPS GET via Node's https module (see hub-client.js) never goes
-    // through 127.0.0.1:8080, so this measures the PC's actual internet,
-    // not "can it reach the filter."
-    try {
-        await getText('https://raw.githubusercontent.com/', 6000);
-        return true;
-    } catch (e) {
-        return false;
-    }
+    // Deliberately independent of the hub and of the local proxy: raw HTTPS
+    // GETs via Node's https module (see hub-client.js) never go through
+    // 127.0.0.1:8080, so this measures the PC's actual internet, not "can it
+    // reach the filter."
+    //
+    // Try several well-known hosts and count internet as UP if ANY responds.
+    // A single reference host can be slow/blocked for a moment and would
+    // otherwise flag a perfectly-online till as "sin internet" on the
+    // dashboard. Requiring only one success makes the signal far less jumpy.
+    const hosts = [
+        'https://www.google.com/generate_204',
+        'https://raw.githubusercontent.com/',
+        'https://www.cloudflare.com/',
+        'https://www.microsoft.com/',
+    ];
+    const attempts = hosts.map((url) =>
+        getText(url, 6000).then(
+            () => true,
+            () => false
+        )
+    );
+    const results = await Promise.all(attempts);
+    return results.some((ok) => ok);
 }
 
 function readLocalWhitelistVersion() {

@@ -30,6 +30,13 @@ set "BRAIN_DIR=%SCRIPT_DIR%WatcherBrain"
 set "STARTUP_FOLDER=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"
 set "SHORTCUT_NAME=URL Whitelist Proxy.lnk"
 
+REM Step 0: Ask for a friendly name + zone for this machine (small popups).
+REM Optional - leaving them blank uses the Windows PC name and no zone. This
+REM only sets what the dashboard shows; it never affects filtering.
+echo [Setup] Machine name / zone...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%BRAIN_DIR%\AskIdentity.ps1" -OutDir "%SCRIPT_DIR%"
+echo.
+
 REM Step 1: Check Node.js (use folder first, then system; if neither, download into folder)
 echo [1/8] Checking Node.js...
 if exist "%BRAIN_DIR%\node\node.exe" (
