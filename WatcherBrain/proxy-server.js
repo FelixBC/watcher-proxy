@@ -11,8 +11,17 @@ const CONFIG = {
     // Whitelist is in parent directory (one level up from WatcherBrain)
     WHITELIST_FILE: path.join(__dirname, '..', 'whitelist.txt'),
     LOG_FILE: path.join(__dirname, 'blocked-requests.log'),
+    // Persisted timestamp of the last log clear, so retention survives reboots
+    // (an interval-only timer resets on every restart and, on a PC that reboots
+    // daily, would never actually fire — see LOG_RETENTION_MS below).
+    LOG_CLEAR_STAMP: path.join(__dirname, 'blocked-log-cleared-at.txt'),
     ERROR_PAGE: path.join(__dirname, 'error-page.html')
 };
+
+// Keep the local blocked-requests log to ~15 days so it can't grow forever.
+// The dashboard/DB is the durable history; this file is just the buffer the
+// agent uploads from, so a full clear here loses nothing already reported.
+const LOG_RETENTION_MS = 15 * 24 * 60 * 60 * 1000;
 
 // Whitelist storage
 let whitelist = {
@@ -132,15 +141,41 @@ function logBlockedRequest(url, ip) {
     }
 }
 
-// Clear blocked-requests.log (called weekly)
-function clearBlockedRequestsLog() {
+// Reboot-proof retention: clear blocked-requests.log only when at least
+// LOG_RETENTION_MS has passed since the last clear, tracked by a persisted
+// timestamp file. Called on startup AND on a daily interval, so it fires on
+// the next run even if the PC rebooted before an in-memory timer could — a
+// plain setInterval(15 days) would silently never trigger on a machine that
+// restarts more often than that.
+function readLastClearMs() {
     try {
-        if (fs.existsSync(CONFIG.LOG_FILE)) {
-            fs.writeFileSync(CONFIG.LOG_FILE, '', 'utf-8');
-            console.log('Blocked requests log cleared (weekly reset).');
+        if (fs.existsSync(CONFIG.LOG_CLEAR_STAMP)) {
+            const t = Date.parse(fs.readFileSync(CONFIG.LOG_CLEAR_STAMP, 'utf-8').trim());
+            if (!Number.isNaN(t)) return t;
         }
     } catch (error) {
-        console.error(`Error clearing log file: ${error.message}`);
+        console.error(`Error reading log-clear stamp: ${error.message}`);
+    }
+    return null;
+}
+
+function pruneBlockedRequestsLogIfDue() {
+    try {
+        const now = Date.now();
+        const last = readLastClearMs();
+        // First run ever: don't clear immediately, just anchor the timestamp.
+        if (last === null) {
+            fs.writeFileSync(CONFIG.LOG_CLEAR_STAMP, new Date(now).toISOString(), 'utf-8');
+            return;
+        }
+        if (now - last < LOG_RETENTION_MS) return;
+        if (fs.existsSync(CONFIG.LOG_FILE)) {
+            fs.writeFileSync(CONFIG.LOG_FILE, '', 'utf-8');
+        }
+        fs.writeFileSync(CONFIG.LOG_CLEAR_STAMP, new Date(now).toISOString(), 'utf-8');
+        console.log(`Blocked requests log cleared (retention ${LOG_RETENTION_MS / 86400000} days).`);
+    } catch (error) {
+        console.error(`Error pruning log file: ${error.message}`);
     }
 }
 
@@ -319,9 +354,12 @@ setInterval(() => {
     loadWhitelist();
 }, 60000);
 
-// Clear blocked-requests.log every week (7 days)
-const ONE_WEEK_MS = 7 * 24 * 60 * 60 * 1000;
-setInterval(clearBlockedRequestsLog, ONE_WEEK_MS);
+// Enforce log retention: once now, then once a day. The daily check is cheap
+// and, combined with the persisted timestamp, guarantees the 15-day clear
+// happens on the next run regardless of how often the PC reboots.
+pruneBlockedRequestsLogIfDue();
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+setInterval(pruneBlockedRequestsLogIfDue, ONE_DAY_MS);
 
 // Watch whitelist file for changes
 if (fs.existsSync(CONFIG.WHITELIST_FILE)) {
