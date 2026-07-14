@@ -15,8 +15,15 @@ const CONFIG = {
     // (an interval-only timer resets on every restart and, on a PC that reboots
     // daily, would never actually fire — see LOG_RETENTION_MS below).
     LOG_CLEAR_STAMP: path.join(__dirname, 'blocked-log-cleared-at.txt'),
+    // Rolling buffer of the last few ALLOWED hosts, so the dashboard can show
+    // what the terminal has been used for. Bounded on purpose (see recordVisit).
+    VISITS_FILE: path.join(__dirname, 'recent-visits.json'),
     ERROR_PAGE: path.join(__dirname, 'error-page.html')
 };
+
+// Keep only the last N allowed hosts. Small on purpose: the poll ships this
+// straight into a bounded column on the machine row (no growing history).
+const MAX_VISITS = 3;
 
 // Keep the local blocked-requests log to ~15 days so it can't grow forever.
 // The dashboard/DB is the durable history; this file is just the buffer the
@@ -139,6 +146,30 @@ function logBlockedRequest(url, ip) {
     } catch (error) {
         console.error(`Error writing to log file: ${error.message}`);
     }
+}
+
+// Record an ALLOWED host into the bounded rolling buffer (newest first, no
+// consecutive duplicates). Fail-open: a write hiccup must never disturb the
+// proxy path, so this only touches a tiny side file.
+let recentVisits = [];
+try {
+    if (fs.existsSync(CONFIG.VISITS_FILE)) {
+        const parsed = JSON.parse(fs.readFileSync(CONFIG.VISITS_FILE, 'utf-8'));
+        if (Array.isArray(parsed)) recentVisits = parsed.slice(0, MAX_VISITS);
+    }
+} catch { /* start empty */ }
+
+function recordVisit(host) {
+    if (!host) return;
+    if (recentVisits[0] && recentVisits[0].host === host) {
+        recentVisits[0].at = new Date().toISOString(); // same site again → just refresh time
+    } else {
+        recentVisits.unshift({ host, at: new Date().toISOString() });
+    }
+    recentVisits = recentVisits.slice(0, MAX_VISITS);
+    try {
+        fs.writeFileSync(CONFIG.VISITS_FILE, JSON.stringify(recentVisits), 'utf-8');
+    } catch { /* fail-open: dashboard nicety, never break the proxy */ }
 }
 
 // Reboot-proof retention: clear blocked-requests.log only when at least
@@ -281,6 +312,7 @@ const server = http.createServer((req, res) => {
         res.end(getErrorPage());
         return;
     }
+    recordVisit(targetHost);
 
     // Create proxy request
     const options = {
@@ -329,6 +361,7 @@ server.on('connect', (req, socket, head) => {
         socket.end();
         return;
     }
+    recordVisit(hostname);
 
     // Create tunnel to target server
     const proxySocket = net.createConnection(targetPort, hostname, () => {

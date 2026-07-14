@@ -29,6 +29,7 @@ const WHITELIST_VERSION_PATH = path.join(BRAIN_DIR, 'whitelist-version.txt');
 const UNPLUGGED_FLAG_PATH = path.join(BRAIN_DIR, 'unplugged.flag');
 const BLOCKED_LOG_PATH = path.join(BRAIN_DIR, 'blocked-requests.log');
 const LOG_CURSOR_PATH = path.join(BRAIN_DIR, 'poll-log-cursor.txt');
+const VISITS_PATH = path.join(BRAIN_DIR, 'recent-visits.json');
 // Set when the hub asks for diagnostics; the NEXT poll uploads the event-log
 // tail and clears it. Two-cycle handshake keeps it dead simple and pull-only.
 const DIAG_PENDING_PATH = path.join(BRAIN_DIR, 'diag-pending.flag');
@@ -126,6 +127,20 @@ function readNewBlockedLogLines() {
         .filter(Boolean);
 }
 
+// Last few allowed hosts the proxy recorded (bounded to 3 on the writer side).
+function readRecentVisits() {
+    try {
+        if (!fs.existsSync(VISITS_PATH)) return [];
+        const parsed = JSON.parse(fs.readFileSync(VISITS_PATH, 'utf-8'));
+        if (!Array.isArray(parsed)) return [];
+        return parsed
+            .filter((v) => v && typeof v.host === 'string' && typeof v.at === 'string')
+            .slice(0, 3);
+    } catch (e) {
+        return [];
+    }
+}
+
 function setUnpluggedFlag(resumeAtIso) {
     fs.writeFileSync(UNPLUGGED_FLAG_PATH, resumeAtIso || '', 'utf-8');
 }
@@ -167,6 +182,7 @@ async function main() {
         whitelist_version: readLocalWhitelistVersion(),
         extras: getReportableExtras(WHITELIST_PATH),
         logs: readNewBlockedLogLines(),
+        recent_visits: readRecentVisits(),
     };
 
     // If the hub asked for diagnostics last time, attach the event-log tail now.
