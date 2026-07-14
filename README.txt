@@ -149,6 +149,46 @@ Next to the "Watcher" folder (one level up):
   Unhides the "Watcher" folder.
 
 
+FLEET / HUB CONNECTION (remote control + auto-update)
+═══════════════════════════════════════════════════════════════
+
+Every ~2 minutes the agent (poll-hub.js) reports to the Watcher Fleet hub
+(the dashboard) and, in the same call, receives instructions. This is how a
+machine is managed WITHOUT UltraViewer. It is a pull model — the machine
+always reaches out; the hub never connects into the machine.
+
+What the hub can do to a machine (all applied on the next poll, ~2 min):
+  - Push the SHARED whitelist. Merged with this PC's local whitelist.txt —
+    never overwrites it (design rule 6). Versioned; only downloads on change.
+  - "Free internet" (unplug): lift the filter for a set time; reverts on its
+    own. Handled by WatchdogLoop.ps1 off the LOCAL clock, so a scheduled
+    resume fires even if the hub is unreachable.
+  - Name / zone: shown on the dashboard. Asked once at install (a small popup,
+    AskIdentity.ps1) or editable from the dashboard. Blank name = PC hostname.
+  - Auto-update: if the hub advertises a newer agent version, self-update.js
+    downloads THAT package FROM THE HUB (not GitHub), verifies its sha256,
+    backs up, swaps files, restarts, health-checks, and rolls back on failure.
+
+Auto-update safety (self-update.js):
+  - Single-flight LOCK: only one update runs at a time (poll fires every 2 min
+    but an update can take longer); stale lock ignored after 20 min.
+  - Download retries (3x) + clean rollback if it still fails.
+  - GOLDEN RULE holds: normal internet is set BEFORE the proxy is touched, so
+    a failed/killed update never leaves the PC offline.
+  - Identity/secret files (HubConfig.json, hub-credential.json, whitelist.txt,
+    machine-name/zone) are NEVER shipped in a release package or overwritten.
+
+Machine identity: registration sends a stable Windows MachineGuid, so a
+reinstall RE-CLAIMS the same dashboard row instead of creating a duplicate.
+
+Log retention: blocked-requests.log is pruned to ~15 days on the PC
+(reboot-proof: a persisted timestamp, checked on startup + daily — not a plain
+timer that resets on reboot). The hub prunes its copy to 15 days too.
+
+Releasing a new agent version is a deliberate act from the fleet repo
+(scripts/publish-agent.mjs) — a normal code commit does NOT update machines.
+
+
 IF SOMETHING GOES WRONG
 ═══════════════════════════════════════════════════════════════
 
@@ -335,6 +375,51 @@ Al lado de la carpeta "Watcher" (un nivel arriba):
 
 - cadabra.bat
   Vuelve a mostrar la carpeta "Watcher".
+
+
+CONEXIÓN CON LA FLOTA / HUB (control remoto + auto-actualización)
+═══════════════════════════════════════════════════════════════
+
+Cada ~2 minutos el agente (poll-hub.js) reporta al hub de Watcher Fleet (el
+panel) y, en la misma llamada, recibe instrucciones. Así se maneja una
+máquina SIN UltraViewer. Es un modelo "pull": la máquina siempre sale a
+buscar; el hub nunca se conecta hacia la máquina.
+
+Lo que el hub le puede hacer a una máquina (todo en su próximo poll, ~2 min):
+  - Enviar la lista COMPARTIDA. Se suma a la whitelist.txt local de esa PC —
+    nunca la reemplaza (regla de diseño 6). Versionada; solo baja si cambió.
+  - "Internet libre": levanta el filtro por un tiempo; vuelve solo. Lo maneja
+    WatchdogLoop.ps1 con el reloj LOCAL, así que el regreso programado ocurre
+    aunque el hub esté inalcanzable.
+  - Nombre / zona: se muestran en el panel. Se piden una vez al instalar (un
+    popup, AskIdentity.ps1) o se editan desde el panel. Nombre vacío = nombre
+    de la PC.
+  - Auto-actualización: si el hub anuncia una versión más nueva, self-update.js
+    baja ESE paquete DESDE EL HUB (no de GitHub), verifica su sha256, hace
+    respaldo, cambia los archivos, reinicia, chequea salud y revierte si falla.
+
+Seguridad de la auto-actualización (self-update.js):
+  - CANDADO de una sola a la vez: solo corre una actualización a la vez (el
+    poll dispara cada 2 min pero un update puede tardar más); un candado viejo
+    se ignora a los 20 min.
+  - Reintentos de descarga (3x) + rollback limpio si aun así falla.
+  - Se mantiene la REGLA DE ORO: se pone internet normal ANTES de tocar el
+    proxy, así un update fallido o muerto nunca deja la PC sin internet.
+  - Los archivos de identidad/secreto (HubConfig.json, hub-credential.json,
+    whitelist.txt, machine-name/zone) NUNCA van en un paquete ni se
+    sobrescriben.
+
+Identidad de la máquina: el registro envía el MachineGuid de Windows, así una
+reinstalación RE-RECLAMA la misma fila del panel en vez de crear un duplicado.
+
+Retención de logs: blocked-requests.log se poda a ~15 días en la PC (a prueba
+de reinicios: un timestamp guardado, revisado al arrancar + a diario — no un
+temporizador que se reinicia con cada reboot). El hub también poda su copia a
+15 días.
+
+Publicar una nueva versión del agente es un acto deliberado desde el repo de la
+flota (scripts/publish-agent.mjs) — un commit normal de código NO actualiza las
+máquinas.
 
 
 SI ALGO SALE MAL
