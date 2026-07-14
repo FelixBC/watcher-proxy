@@ -21,6 +21,7 @@ const { execSync } = require('child_process');
 const { BRAIN_DIR, readHubConfig, readCredential, postJson, getText } = require('./hub-client');
 const { registerIfNeeded } = require('./register-with-hub');
 const { applyPushedWhitelist, getReportableExtras } = require('./whitelist-merge');
+const { appendEvent, readTail } = require('./event-log');
 
 const WHITELIST_PATH = path.join(BRAIN_DIR, '..', 'whitelist.txt');
 const VERSION_PATH = path.join(BRAIN_DIR, '..', 'VERSION');
@@ -28,6 +29,9 @@ const WHITELIST_VERSION_PATH = path.join(BRAIN_DIR, 'whitelist-version.txt');
 const UNPLUGGED_FLAG_PATH = path.join(BRAIN_DIR, 'unplugged.flag');
 const BLOCKED_LOG_PATH = path.join(BRAIN_DIR, 'blocked-requests.log');
 const LOG_CURSOR_PATH = path.join(BRAIN_DIR, 'poll-log-cursor.txt');
+// Set when the hub asks for diagnostics; the NEXT poll uploads the event-log
+// tail and clears it. Two-cycle handshake keeps it dead simple and pull-only.
+const DIAG_PENDING_PATH = path.join(BRAIN_DIR, 'diag-pending.flag');
 
 function checkTcpOpen(host, port, timeoutMs) {
     return new Promise((resolve) => {
@@ -165,7 +169,21 @@ async function main() {
         logs: readNewBlockedLogLines(),
     };
 
+    // If the hub asked for diagnostics last time, attach the event-log tail now.
+    const diagPending = fs.existsSync(DIAG_PENDING_PATH);
+    if (diagPending) {
+        body.diagnostics = readTail(80) || '(sin eventos registrados)';
+    }
+
     const response = await postJson(config.HubUrl, '/api/agent/poll', body);
+
+    // Diagnostics handshake: clear the flag once uploaded; set it when asked.
+    if (diagPending) {
+        try { fs.unlinkSync(DIAG_PENDING_PATH); } catch (e) {}
+    }
+    if (response.diag_requested) {
+        try { fs.writeFileSync(DIAG_PENDING_PATH, '', 'utf-8'); } catch (e) {}
+    }
 
     if (typeof response.whitelist_version === 'number' && response.whitelist_version !== body.whitelist_version) {
         applyPushedWhitelist(WHITELIST_PATH, response.whitelist_entries || []);
@@ -192,6 +210,8 @@ async function main() {
 main().catch((err) => {
     // Anything above failing (hub down, network down, bad response) simply
     // means "no update this cycle" — never touch local state on failure.
+    // Record it (bounded) so "the machine went quiet" is diagnosable later.
+    try { appendEvent('hub-unreachable', err && err.message); } catch (e) {}
     console.error('poll-hub failed (no local changes made):', err.message);
     process.exit(1);
 });

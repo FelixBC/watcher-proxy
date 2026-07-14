@@ -16,6 +16,7 @@ const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 
 const { BRAIN_DIR, downloadFile } = require('./hub-client');
+const { appendEvent } = require('./event-log');
 
 const ROOT_DIR = path.join(BRAIN_DIR, '..');
 const VERSION_PATH = path.join(ROOT_DIR, 'VERSION');
@@ -302,7 +303,9 @@ async function main() {
         }
 
         log(`Update to ${argVersion} successful and healthy.`);
+        appendEvent('update-ok', `${localVersion} -> ${argVersion}`);
     } catch (e) {
+        appendEvent('update-failed', `${argVersion}: ${describeError(e)}`);
         log(`Update failed with an error, attempting rollback: ${describeError(e)}`);
         try {
             stopProxyAndWatchdog();

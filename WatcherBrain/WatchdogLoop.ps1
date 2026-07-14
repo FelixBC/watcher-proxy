@@ -15,9 +15,28 @@ $StartWatcherPath = Join-Path $BrainDir 'StartWatcher.vbs'
 $SafetyScript = Join-Path $BrainDir 'SetProxyByAvailability.ps1'
 $PidFile = Join-Path $BrainDir 'watchdog_loop.pid'
 $UnpluggedFlagPath = Join-Path $BrainDir 'unplugged.flag'
+$EventsPath = Join-Path $BrainDir 'events.log'
 
 # Write PID so BackToNormal can stop this loop
 $PID | Out-File -FilePath $PidFile -Force -ErrorAction SilentlyContinue
+
+# Bounded local breadcrumb log — records only state CHANGES (not every 5s tick),
+# so it stays tiny. This is what tells us later WHY a machine's filter dropped
+# out or why it went quiet. Uploaded only when the dashboard asks (pull).
+function Write-Event([string]$tag, [string]$detail) {
+    try {
+        $suffix = if ($detail) { " | $detail" } else { "" }
+        $line = "[{0}] {1}{2}" -f (Get-Date).ToUniversalTime().ToString('o'), $tag, $suffix
+        Add-Content -Path $EventsPath -Value $line -ErrorAction SilentlyContinue
+        $fi = Get-Item $EventsPath -ErrorAction SilentlyContinue
+        if ($fi -and $fi.Length -gt 65536) {
+            $keep = Get-Content $EventsPath -Tail 400 -ErrorAction SilentlyContinue
+            Set-Content -Path $EventsPath -Value $keep -ErrorAction SilentlyContinue
+        }
+    } catch {}
+}
+Write-Event 'watchdog-start' 'loop iniciado en el logon'
+$prevProxyUp = $null
 
 function Test-ProxyListening {
     $timeoutMs = 2000
@@ -86,6 +105,17 @@ while ($true) {
     }
 
     $proxyUp = Test-ProxyListening
+
+    # Log only real transitions (not every 5s tick).
+    if ($null -ne $prevProxyUp -and $proxyUp -ne $prevProxyUp) {
+        if ($proxyUp) {
+            Write-Event 'proxy-recovered' 'filtro restaurado'
+        } else {
+            Write-Event 'proxy-down' 'internet normal (fail-open); reiniciando proxy'
+        }
+    }
+    $prevProxyUp = $proxyUp
+
     if ($proxyUp) {
         # Proxy is UP: ensure Windows is using the proxy (restriction ON).
         if (Test-Path $SafetyScript) { & $SafetyScript | Out-Null }
