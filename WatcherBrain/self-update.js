@@ -12,17 +12,20 @@
 
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
+const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 
-const { BRAIN_DIR, getText, downloadFile } = require('./hub-client');
+const { BRAIN_DIR, downloadFile } = require('./hub-client');
 
 const ROOT_DIR = path.join(BRAIN_DIR, '..');
 const VERSION_PATH = path.join(ROOT_DIR, 'VERSION');
 const UPDATE_LOG_PATH = path.join(BRAIN_DIR, 'update.log');
 
-const REPO_RAW_VERSION_URL = 'https://raw.githubusercontent.com/FelixBC/watcher-proxy/main/VERSION';
-const REPO_ZIP_URL = 'https://github.com/FelixBC/watcher-proxy/archive/refs/heads/main.zip';
+// All update work happens INSIDE WatcherBrain (which InstallWatcher.bat adds to
+// the Windows Defender exclusion). A prior silent crash was consistent with
+// Defender killing node while it unzipped in %TEMP% — outside the exclusion.
+// Keeping the temp zip + extract here removes that whole failure mode.
+const UPDATE_DIR = path.join(BRAIN_DIR, '_update');
 
 // Never overwritten by an update: machine identity/secrets, this machine's
 // own local whitelist extras, and anything log/state-like that isn't code.
@@ -35,7 +38,11 @@ const PROTECTED_RELATIVE_PATHS = [
     'WatcherBrain/whitelist-version.txt',
     'WatcherBrain/poll-log-cursor.txt',
     'WatcherBrain/blocked-requests.log',
+    'WatcherBrain/blocked-log-cleared-at.txt',
     'WatcherBrain/update.log',
+    'WatcherBrain/_update',
+    'WatcherBrain/machine-name.txt',
+    'WatcherBrain/machine-zone.txt',
     '.git',
 ];
 
@@ -174,36 +181,46 @@ function restoreBackup(backupDir) {
 }
 
 async function main() {
-    const localVersion = fs.existsSync(VERSION_PATH)
-        ? fs.readFileSync(VERSION_PATH, 'utf-8').trim()
-        : '0.0.0';
-
-    let remoteVersion;
-    try {
-        remoteVersion = (await getText(REPO_RAW_VERSION_URL, 10000)).trim();
-    } catch (e) {
-        log(`Update check failed (no local changes made): ${describeError(e)}`);
+    // Target comes from the hub via poll-hub.js: version, download URL, sha256.
+    const [, , argVersion, argUrl, argSha] = process.argv;
+    if (!argVersion || !argUrl) {
+        log('self-update called without version/url — nothing to do.');
         return;
     }
 
-    if (remoteVersion === localVersion) {
-        return; // nothing to do
+    const localVersion = fs.existsSync(VERSION_PATH)
+        ? fs.readFileSync(VERSION_PATH, 'utf-8').trim()
+        : '0.0.0';
+    if (argVersion === localVersion) {
+        return; // already on this version
     }
 
-    log(`Update available: ${localVersion} -> ${remoteVersion}`);
+    log(`Update available (from hub): ${localVersion} -> ${argVersion}`);
+
+    // Fresh workspace inside the Defender-excluded folder.
+    try { fs.rmSync(UPDATE_DIR, { recursive: true, force: true }); } catch (e) {}
+    fs.mkdirSync(UPDATE_DIR, { recursive: true });
+    const tempZip = path.join(UPDATE_DIR, 'package.zip');
+    const tempExtract = path.join(UPDATE_DIR, 'extract');
 
     const backupDir = backupCurrent(localVersion);
     log(`Backed up current install to ${backupDir}`);
 
-    const tempZip = path.join(os.tmpdir(), `watcher-proxy-update-${Date.now()}.zip`);
-    const tempExtract = path.join(os.tmpdir(), `watcher-proxy-update-extract-${Date.now()}`);
-
     try {
-        log(`Starting download of ${REPO_ZIP_URL} to ${tempZip}`);
-        await downloadFile(REPO_ZIP_URL, tempZip, 60000, (event, detail) => {
+        log(`Starting download of ${argUrl} to ${tempZip}`);
+        await downloadFile(argUrl, tempZip, 60000, (event, detail) => {
             log(`downloadFile: ${event} ${JSON.stringify(detail)}`);
         });
         log('Download finished.');
+
+        // Verify the bytes BEFORE we touch anything on the machine.
+        if (argSha) {
+            const actual = crypto.createHash('sha256').update(fs.readFileSync(tempZip)).digest('hex');
+            if (actual.toLowerCase() !== argSha.toLowerCase()) {
+                throw new Error(`checksum mismatch: expected ${argSha}, got ${actual}`);
+            }
+            log('Checksum OK.');
+        }
 
         // GOLDEN RULE: normal internet before the proxy is touched.
         flipToNormalInternet();
@@ -215,12 +232,9 @@ async function main() {
             `Expand-Archive -Path '${tempZip}' -DestinationPath '${tempExtract}' -Force`
         ]);
 
-        const extractedRoot = fs
-            .readdirSync(tempExtract, { withFileTypes: true })
-            .find((e) => e.isDirectory());
-        if (!extractedRoot) throw new Error('update archive had no root folder');
-
-        copyTree(path.join(tempExtract, extractedRoot.name), ROOT_DIR, '');
+        // The hub bundle has files at the extract root (no wrapper folder).
+        copyTree(tempExtract, ROOT_DIR, '');
+        fs.writeFileSync(VERSION_PATH, argVersion, 'utf-8'); // hub is authoritative
         log('New files copied in.');
 
         startProxyAndWatchdog();
@@ -230,6 +244,7 @@ async function main() {
             log('Post-update health check FAILED — rolling back.');
             stopProxyAndWatchdog();
             restoreBackup(backupDir);
+            fs.writeFileSync(VERSION_PATH, localVersion, 'utf-8');
             startProxyAndWatchdog();
             const rolledBackHealthy = await waitForHealthy(5, 3000);
             log(
@@ -240,19 +255,19 @@ async function main() {
             return;
         }
 
-        log(`Update to ${remoteVersion} successful and healthy.`);
+        log(`Update to ${argVersion} successful and healthy.`);
     } catch (e) {
         log(`Update failed with an error, attempting rollback: ${describeError(e)}`);
         try {
             stopProxyAndWatchdog();
             restoreBackup(backupDir);
+            fs.writeFileSync(VERSION_PATH, localVersion, 'utf-8');
             startProxyAndWatchdog();
         } catch (rollbackErr) {
             log(`Rollback itself failed: ${rollbackErr.message}. Watchdog remains responsible for fail-open safety.`);
         }
     } finally {
-        try { fs.unlinkSync(tempZip); } catch (e) {}
-        try { fs.rmSync(tempExtract, { recursive: true, force: true }); } catch (e) {}
+        try { fs.rmSync(UPDATE_DIR, { recursive: true, force: true }); } catch (e) {}
     }
 }
 
