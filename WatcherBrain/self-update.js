@@ -26,6 +26,46 @@ const UPDATE_LOG_PATH = path.join(BRAIN_DIR, 'update.log');
 // Defender killing node while it unzipped in %TEMP% — outside the exclusion.
 // Keeping the temp zip + extract here removes that whole failure mode.
 const UPDATE_DIR = path.join(BRAIN_DIR, '_update');
+// Single-flight lock: poll-hub fires every couple of minutes, and an update
+// can take longer than that (slow disk/network), so without a lock each poll
+// would spawn ANOTHER self-update on top of the running one — several racing
+// to back up, stop the proxy and copy files at once. This guarantees one at a
+// time; a stale lock (older than LOCK_STALE_MS, e.g. a run that was killed) is
+// ignored so a machine can never get stuck unable to update.
+const LOCK_PATH = path.join(BRAIN_DIR, 'update.lock');
+const LOCK_STALE_MS = 20 * 60 * 1000;
+
+function acquireLock() {
+    try {
+        if (fs.existsSync(LOCK_PATH)) {
+            const age = Date.now() - fs.statSync(LOCK_PATH).mtimeMs;
+            if (age < LOCK_STALE_MS) return false;
+        }
+        fs.writeFileSync(LOCK_PATH, new Date().toISOString(), 'utf-8');
+        return true;
+    } catch (e) {
+        return true; // if we can't manage the lock, don't block updates
+    }
+}
+
+function releaseLock() {
+    try { fs.unlinkSync(LOCK_PATH); } catch (e) {}
+}
+
+async function downloadWithRetry(url, dest, timeoutMs, attempts, onEvent) {
+    let lastErr;
+    for (let i = 1; i <= attempts; i++) {
+        try {
+            await downloadFile(url, dest, timeoutMs, onEvent);
+            return;
+        } catch (e) {
+            lastErr = e;
+            log(`download attempt ${i}/${attempts} failed: ${e.message}`);
+            await new Promise((r) => setTimeout(r, 3000));
+        }
+    }
+    throw lastErr;
+}
 
 // Never overwritten by an update: machine identity/secrets, this machine's
 // own local whitelist extras, and anything log/state-like that isn't code.
@@ -195,6 +235,12 @@ async function main() {
         return; // already on this version
     }
 
+    // Only one update at a time (see LOCK_PATH note above).
+    if (!acquireLock()) {
+        log('Another update is already in progress — skipping this trigger.');
+        return;
+    }
+
     log(`Update available (from hub): ${localVersion} -> ${argVersion}`);
 
     // Fresh workspace inside the Defender-excluded folder.
@@ -208,7 +254,7 @@ async function main() {
 
     try {
         log(`Starting download of ${argUrl} to ${tempZip}`);
-        await downloadFile(argUrl, tempZip, 60000, (event, detail) => {
+        await downloadWithRetry(argUrl, tempZip, 60000, 3, (event, detail) => {
             log(`downloadFile: ${event} ${JSON.stringify(detail)}`);
         });
         log('Download finished.');
@@ -268,6 +314,7 @@ async function main() {
         }
     } finally {
         try { fs.rmSync(UPDATE_DIR, { recursive: true, force: true }); } catch (e) {}
+        releaseLock();
     }
 }
 
