@@ -130,11 +130,11 @@ function clearUnpluggedFlag() {
     if (fs.existsSync(UNPLUGGED_FLAG_PATH)) fs.unlinkSync(UNPLUGGED_FLAG_PATH);
 }
 
-function triggerSelfUpdate() {
+function triggerSelfUpdate(version, url, sha256) {
     const { spawn } = require('child_process');
     const child = spawn(
         process.execPath,
-        [path.join(BRAIN_DIR, 'self-update.js')],
+        [path.join(BRAIN_DIR, 'self-update.js'), version, url, sha256 || ''],
         { detached: true, stdio: 'ignore', cwd: BRAIN_DIR }
     );
     child.unref();
@@ -180,8 +180,12 @@ async function main() {
     }
 
     const localAgentVersion = readLocalAgentVersion();
-    if (response.agent_version && response.agent_version !== localAgentVersion) {
-        triggerSelfUpdate();
+    if (
+        response.agent_version &&
+        response.agent_version !== localAgentVersion &&
+        response.agent_download_url
+    ) {
+        triggerSelfUpdate(response.agent_version, response.agent_download_url, response.agent_sha256);
     }
 }
 
