@@ -37,6 +37,7 @@ function Write-Event([string]$tag, [string]$detail) {
 }
 Write-Event 'watchdog-start' 'loop iniciado en el logon'
 $prevProxyUp = $null
+$prevUnplugged = $null
 
 function Test-ProxyListening {
     $timeoutMs = 2000
@@ -90,7 +91,19 @@ function Test-ShouldStayUnplugged {
 while ($true) {
     Start-Sleep -Seconds 5
 
-    if (Test-ShouldStayUnplugged) {
+    $unplugNow = Test-ShouldStayUnplugged
+
+    # Log only the transition in/out of "internet libre" (not every 5s tick).
+    if ($null -ne $prevUnplugged -and $unplugNow -ne $prevUnplugged) {
+        if ($unplugNow) {
+            Write-Event 'internet-libre-on' 'filtro levantado a proposito (dashboard)'
+        } else {
+            Write-Event 'internet-libre-off' 'filtro restaurado (fin del tiempo)'
+        }
+    }
+    $prevUnplugged = $unplugNow
+
+    if ($unplugNow) {
         # GOLDEN RULE ORDER: flip Windows to normal internet FIRST, then stop
         # the proxy — never the other way round, so there is no window where
         # the proxy is dead but Windows still points at 127.0.0.1:8080.

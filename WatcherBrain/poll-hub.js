@@ -21,7 +21,7 @@ const { execSync } = require('child_process');
 const { BRAIN_DIR, readHubConfig, readCredential, postJson, getText } = require('./hub-client');
 const { registerIfNeeded } = require('./register-with-hub');
 const { applyPushedWhitelist, getReportableExtras } = require('./whitelist-merge');
-const { appendEvent, readTail } = require('./event-log');
+const { appendEvent, readAll, pruneByTime } = require('./event-log');
 
 const WHITELIST_PATH = path.join(BRAIN_DIR, '..', 'whitelist.txt');
 const VERSION_PATH = path.join(BRAIN_DIR, '..', 'VERSION');
@@ -30,6 +30,7 @@ const UNPLUGGED_FLAG_PATH = path.join(BRAIN_DIR, 'unplugged.flag');
 const BLOCKED_LOG_PATH = path.join(BRAIN_DIR, 'blocked-requests.log');
 const LOG_CURSOR_PATH = path.join(BRAIN_DIR, 'poll-log-cursor.txt');
 const VISITS_PATH = path.join(BRAIN_DIR, 'recent-visits.json');
+const NET_STATE_PATH = path.join(BRAIN_DIR, 'net-state.txt');
 // Set when the hub asks for diagnostics; the NEXT poll uploads the event-log
 // tail and clears it. Two-cycle handshake keeps it dead simple and pull-only.
 const DIAG_PENDING_PATH = path.join(BRAIN_DIR, 'diag-pending.flag');
@@ -141,6 +142,27 @@ function readRecentVisits() {
     }
 }
 
+// Record only CHANGES in the machine's internet reachability, and interpret
+// them for later auditing: internet gone while the proxy is UP means the
+// machine/ISP lost connectivity — NOT the Watcher. This is the line that lets
+// a reader tell the two apart.
+function logInternetTransition(reachable, proxyRunning) {
+    try {
+        const prev = fs.existsSync(NET_STATE_PATH) ? fs.readFileSync(NET_STATE_PATH, 'utf-8').trim() : '';
+        const now = reachable ? 'up' : 'down';
+        if (prev !== now) {
+            fs.writeFileSync(NET_STATE_PATH, now, 'utf-8');
+            if (!reachable) {
+                appendEvent('internet-lost', proxyRunning
+                    ? 'proxy OK, sin salida a internet — ISP/maquina, no el Watcher'
+                    : 'sin internet y proxy abajo');
+            } else if (prev) {
+                appendEvent('internet-back', 'salida a internet restablecida');
+            }
+        }
+    } catch (e) { /* best effort */ }
+}
+
 function setUnpluggedFlag(resumeAtIso) {
     fs.writeFileSync(UNPLUGGED_FLAG_PATH, resumeAtIso || '', 'utf-8');
 }
@@ -173,6 +195,11 @@ async function main() {
     // intentionally unplugged (matches WatchdogLoop.ps1's own logic).
     const filterActive = proxyRunning && !unplugged;
 
+    // Audit breadcrumbs (local): internet reachability changes + time-based
+    // pruning of the shared events.log so it never grows past its window.
+    logInternetTransition(internetReachable, proxyRunning);
+    pruneByTime();
+
     const body = {
         machine_id: cred.machine_id,
         credential: cred.credential,
@@ -188,7 +215,9 @@ async function main() {
     // If the hub asked for diagnostics last time, attach the event-log tail now.
     const diagPending = fs.existsSync(DIAG_PENDING_PATH);
     if (diagPending) {
-        body.diagnostics = readTail(80) || '(sin eventos registrados)';
+        // Send the whole recent trail (bounded) so an auditor sees the full
+        // picture, not just the last few lines.
+        body.diagnostics = readAll(60000) || '(sin eventos registrados)';
     }
 
     const response = await postJson(config.HubUrl, '/api/agent/poll', body);

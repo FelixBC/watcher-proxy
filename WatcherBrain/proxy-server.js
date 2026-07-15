@@ -4,6 +4,19 @@ const net = require('net');
 const fs = require('fs');
 const path = require('path');
 const url = require('url');
+const { appendEvent, pruneByTime } = require('./event-log');
+
+// Crash breadcrumbs: if the proxy dies from an unhandled error, record WHY
+// before exiting so the watchdog's restart isn't a mystery later. Exit so the
+// watchdog (which owns restart) brings it back cleanly.
+process.on('uncaughtException', (e) => {
+    try { appendEvent('proxy-crash', e && e.message ? e.message : String(e)); } catch (_) {}
+    process.exit(1);
+});
+process.on('unhandledRejection', (e) => {
+    try { appendEvent('proxy-crash', 'promesa sin manejar: ' + (e && e.message ? e.message : String(e))); } catch (_) {}
+    process.exit(1);
+});
 
 // Configuration
 const CONFIG = {
@@ -391,8 +404,10 @@ setInterval(() => {
 // and, combined with the persisted timestamp, guarantees the 15-day clear
 // happens on the next run regardless of how often the PC reboots.
 pruneBlockedRequestsLogIfDue();
+pruneByTime(); // trim the events.log audit trail to its time window too
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 setInterval(pruneBlockedRequestsLogIfDue, ONE_DAY_MS);
+setInterval(pruneByTime, ONE_DAY_MS);
 
 // Watch whitelist file for changes
 if (fs.existsSync(CONFIG.WHITELIST_FILE)) {
@@ -404,9 +419,16 @@ if (fs.existsSync(CONFIG.WHITELIST_FILE)) {
     });
 }
 
+// Server-level errors (e.g. port already in use) are a Watcher-side failure —
+// record the reason so it's not just "proxy down" with no cause.
+server.on('error', (err) => {
+    try { appendEvent('proxy-error', err && err.message ? err.message : String(err)); } catch (_) {}
+});
+
 // Start server
 loadWhitelist();
 server.listen(CONFIG.PORT, () => {
+    try { appendEvent('proxy-up', `escuchando 127.0.0.1:${CONFIG.PORT}`); } catch (_) {}
     console.log(`\n========================================`);
     console.log(`  Proxy Server Started Successfully`);
     console.log(`========================================`);
