@@ -35,6 +35,12 @@ const NET_STATE_PATH = path.join(BRAIN_DIR, 'net-state.txt');
 // tail and clears it. Two-cycle handshake keeps it dead simple and pull-only.
 const DIAG_PENDING_PATH = path.join(BRAIN_DIR, 'diag-pending.flag');
 
+// Spread hub hits across this window (anti-thundering-herd). 90s is well under
+// the ~5-min poll cadence and the 12-min "stale" threshold, so it decorrelates
+// machines without ever risking one looking offline.
+const POLL_JITTER_MS = 90 * 1000;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 function checkTcpOpen(host, port, timeoutMs) {
     return new Promise((resolve) => {
         const socket = new net.Socket();
@@ -185,6 +191,15 @@ async function main() {
     const credentialFile = readCredential();
     const cred = credentialFile || (await registerIfNeeded());
     const config = readHubConfig();
+
+    // Jitter: wait a random slice of a window BEFORE doing anything with the
+    // hub, so machines whose 5-min timers accidentally lined up (a whole shop
+    // powering on at 8am, everyone rebooting after an outage) don't all hit the
+    // hub in the same second. Re-randomized every poll, so any accidental
+    // alignment scatters on its own. Well under the "stale" threshold, so it
+    // never risks a machine looking offline. State is read AFTER the wait, so
+    // the report is fresh at send time.
+    await sleep(Math.floor(Math.random() * POLL_JITTER_MS));
 
     const [internetReachable, proxyRunning] = await Promise.all([
         checkInternetReachable(),
