@@ -85,6 +85,9 @@ const PROTECTED_RELATIVE_PATHS = [
     'WatcherBrain/machine-name.txt',
     'WatcherBrain/machine-zone.txt',
     'WatcherBrain/machine-code.txt',
+    'WatcherBrain/location.json',
+    'WatcherBrain/locate-pending.flag',
+    'WatcherBrain/tamper-cursor.txt',
     '.git',
 ];
 

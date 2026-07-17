@@ -35,6 +35,12 @@ const NET_STATE_PATH = path.join(BRAIN_DIR, 'net-state.txt');
 // Set when the hub asks for diagnostics; the NEXT poll uploads the event-log
 // tail and clears it. Two-cycle handshake keeps it dead simple and pull-only.
 const DIAG_PENDING_PATH = path.join(BRAIN_DIR, 'diag-pending.flag');
+const LOCATION_PATH = path.join(BRAIN_DIR, 'location.json');
+const LOCATE_PENDING_PATH = path.join(BRAIN_DIR, 'locate-pending.flag');
+const TAMPER_CURSOR_PATH = path.join(BRAIN_DIR, 'tamper-cursor.txt');
+const GET_LOCATION_PS = path.join(BRAIN_DIR, 'GetLocation.ps1');
+const EVENTS_LOG_PATH = path.join(BRAIN_DIR, 'events.log');
+const LOCATION_MAX_AGE_MS = 55 * 60 * 1000; // sample ~hourly
 
 // Spread hub hits across this window (anti-thundering-herd). Sized to the ~2-min
 // poll cadence: 30s decorrelates machines that fired together without stretching
@@ -170,6 +176,75 @@ function logInternetTransition(reachable, proxyRunning) {
     } catch (e) { /* best effort */ }
 }
 
+// Refresh location.json by running GetLocation.ps1, but only when it's stale
+// (~hourly) or forced (a "locate now" request). Synchronous + time-boxed; any
+// failure is swallowed so a poll never hangs or breaks on location.
+function refreshLocationIfDue(force) {
+    try {
+        let due = force;
+        if (!due) {
+            const stat = fs.existsSync(LOCATION_PATH) ? fs.statSync(LOCATION_PATH) : null;
+            due = !stat || (Date.now() - stat.mtimeMs > LOCATION_MAX_AGE_MS);
+        }
+        if (!due) return;
+        const out = require('child_process').execFileSync(
+            'powershell',
+            ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', GET_LOCATION_PS],
+            { timeout: 15000, encoding: 'utf-8' }
+        );
+        const parsed = JSON.parse(out.trim());
+        if (parsed && typeof parsed.lat === 'number' && typeof parsed.lng === 'number') {
+            fs.writeFileSync(
+                LOCATION_PATH,
+                JSON.stringify({ lat: parsed.lat, lng: parsed.lng, acc: parsed.acc ?? null, at: new Date().toISOString() }),
+                'utf-8'
+            );
+        }
+    } catch (e) {
+        /* no fix this cycle — leave the last one (if any) in place */
+    }
+}
+
+function readLocation() {
+    try {
+        if (!fs.existsSync(LOCATION_PATH)) return null;
+        const v = JSON.parse(fs.readFileSync(LOCATION_PATH, 'utf-8'));
+        if (v && typeof v.lat === 'number' && typeof v.lng === 'number') return v;
+        return null;
+    } catch (e) {
+        return null;
+    }
+}
+
+// Tamper events are lines in events.log tagged `tamper` (written by
+// BackToNormal / watchdog before the agent might be killed). Return the ones
+// newer than the cursor timestamp; the caller advances the cursor only AFTER a
+// successful upload so nothing is lost if the poll fails.
+function readNewTamperEvents() {
+    try {
+        if (!fs.existsSync(EVENTS_LOG_PATH)) return { events: [], maxTs: null };
+        const sinceIso = fs.existsSync(TAMPER_CURSOR_PATH)
+            ? fs.readFileSync(TAMPER_CURSOR_PATH, 'utf-8').trim()
+            : '';
+        const since = sinceIso ? Date.parse(sinceIso) : 0;
+        const lines = fs.readFileSync(EVENTS_LOG_PATH, 'utf-8').split(/\r?\n/);
+        const re = /^\[([^\]]+)\]\s*tamper\s*(?:\|\s*(.*))?$/i;
+        const events = [];
+        let maxTs = sinceIso || null;
+        for (const line of lines) {
+            const m = line.match(re);
+            if (!m) continue;
+            const ts = Date.parse(m[1]);
+            if (Number.isNaN(ts) || (since && ts <= since)) continue;
+            events.push({ at: new Date(ts).toISOString(), kind: 'tamper', detail: (m[2] || '').trim() });
+            if (!maxTs || ts > Date.parse(maxTs)) maxTs = new Date(ts).toISOString();
+        }
+        return { events: events.slice(-20), maxTs };
+    } catch (e) {
+        return { events: [], maxTs: null };
+    }
+}
+
 // The first allowed page of the day (written by the proxy). Sent as {host, at}.
 function readFirstVisit() {
     try {
@@ -244,6 +319,18 @@ async function main() {
     const firstVisit = readFirstVisit();
     if (firstVisit) body.first_visit = firstVisit;
 
+    // Location: refresh ~hourly (or now, if the hub asked via locate_requested
+    // last cycle), then attach the latest fix if we have one.
+    const locateForced = fs.existsSync(LOCATE_PENDING_PATH);
+    refreshLocationIfDue(locateForced);
+    if (locateForced) { try { fs.unlinkSync(LOCATE_PENDING_PATH); } catch (e) {} }
+    const location = readLocation();
+    if (location) body.location = location;
+
+    // Tamper events (uninstall attempt, etc.) since the last upload.
+    const tamper = readNewTamperEvents();
+    if (tamper.events.length > 0) body.tamper_events = tamper.events;
+
     // If the hub asked for diagnostics last time, attach the event-log tail now.
     const diagPending = fs.existsSync(DIAG_PENDING_PATH);
     if (diagPending) {
@@ -260,6 +347,16 @@ async function main() {
     }
     if (response.diag_requested) {
         try { fs.writeFileSync(DIAG_PENDING_PATH, '', 'utf-8'); } catch (e) {}
+    }
+
+    // Locate handshake: hub asks → force a fresh fix on the next poll.
+    if (response.locate_requested) {
+        try { fs.writeFileSync(LOCATE_PENDING_PATH, '', 'utf-8'); } catch (e) {}
+    }
+    // Tamper cursor advances ONLY after a successful post, so a failed poll
+    // re-sends the events next time instead of dropping them.
+    if (tamper.events.length > 0 && tamper.maxTs) {
+        try { fs.writeFileSync(TAMPER_CURSOR_PATH, tamper.maxTs, 'utf-8'); } catch (e) {}
     }
 
     if (typeof response.whitelist_version === 'number' && response.whitelist_version !== body.whitelist_version) {

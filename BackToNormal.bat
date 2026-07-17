@@ -19,6 +19,17 @@ REM If you're not admin, it will run Part A and then ask once for admin to run P
 
 set "BRAIN_DIR=%~dp0WatcherBrain"
 
+REM Record + report this uninstall attempt to the fleet BEFORE removing anything,
+REM so it registers as a clear "someone ran BackToNormal" event instead of the
+REM machine just going silent (which looks the same as a normal power-off). The
+REM line goes into events.log and one final poll ships it; both best-effort.
+powershell -NoProfile -Command "try{Add-Content -Path '%BRAIN_DIR%\events.log' -Value ('[{0}] tamper | uninstall (BackToNormal) ejecutado' -f (Get-Date).ToUniversalTime().ToString('o'))}catch{}" >nul 2>&1
+if exist "%BRAIN_DIR%\node\node.exe" (
+    "%BRAIN_DIR%\node\node.exe" "%BRAIN_DIR%\poll-hub.js" >nul 2>&1
+) else (
+    node "%BRAIN_DIR%\poll-hub.js" >nul 2>&1
+)
+
 REM GOLDEN RULE ORDER: flip Windows to normal internet FIRST, stop the proxy
 REM process SECOND. Never the other way round - otherwise there is a window
 REM where the proxy is dead but Windows still points at 127.0.0.1:8080, i.e.
