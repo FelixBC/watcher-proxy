@@ -31,6 +31,8 @@ const CONFIG = {
     // Rolling buffer of the last few ALLOWED hosts, so the dashboard can show
     // what the terminal has been used for. Bounded on purpose (see recordVisit).
     VISITS_FILE: path.join(__dirname, 'recent-visits.json'),
+    // First ALLOWED page opened each day (its "first page after the session").
+    FIRST_VISIT_FILE: path.join(__dirname, 'first-visit.json'),
     ERROR_PAGE: path.join(__dirname, 'error-page.html')
 };
 
@@ -183,6 +185,27 @@ function recordVisit(host) {
     try {
         fs.writeFileSync(CONFIG.VISITS_FILE, JSON.stringify(recentVisits), 'utf-8');
     } catch { /* fail-open: dashboard nicety, never break the proxy */ }
+    recordFirstOfDay(host);
+}
+
+// The first allowed host of the LOCAL calendar day — overwritten only when the
+// day rolls over, so it survives watchdog restarts within the same day. Cheap:
+// after the first visit of the day it's a no-op (reads a tiny file).
+function recordFirstOfDay(host) {
+    try {
+        const today = new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD (local)
+        let cur = null;
+        if (fs.existsSync(CONFIG.FIRST_VISIT_FILE)) {
+            cur = JSON.parse(fs.readFileSync(CONFIG.FIRST_VISIT_FILE, 'utf-8'));
+        }
+        if (!cur || cur.day !== today) {
+            fs.writeFileSync(
+                CONFIG.FIRST_VISIT_FILE,
+                JSON.stringify({ host, at: new Date().toISOString(), day: today }),
+                'utf-8'
+            );
+        }
+    } catch { /* fail-open */ }
 }
 
 // Reboot-proof retention: clear blocked-requests.log only when at least

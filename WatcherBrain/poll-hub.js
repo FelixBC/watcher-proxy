@@ -30,6 +30,7 @@ const UNPLUGGED_FLAG_PATH = path.join(BRAIN_DIR, 'unplugged.flag');
 const BLOCKED_LOG_PATH = path.join(BRAIN_DIR, 'blocked-requests.log');
 const LOG_CURSOR_PATH = path.join(BRAIN_DIR, 'poll-log-cursor.txt');
 const VISITS_PATH = path.join(BRAIN_DIR, 'recent-visits.json');
+const FIRST_VISIT_PATH = path.join(BRAIN_DIR, 'first-visit.json');
 const NET_STATE_PATH = path.join(BRAIN_DIR, 'net-state.txt');
 // Set when the hub asks for diagnostics; the NEXT poll uploads the event-log
 // tail and clears it. Two-cycle handshake keeps it dead simple and pull-only.
@@ -169,6 +170,20 @@ function logInternetTransition(reachable, proxyRunning) {
     } catch (e) { /* best effort */ }
 }
 
+// The first allowed page of the day (written by the proxy). Sent as {host, at}.
+function readFirstVisit() {
+    try {
+        if (!fs.existsSync(FIRST_VISIT_PATH)) return null;
+        const v = JSON.parse(fs.readFileSync(FIRST_VISIT_PATH, 'utf-8'));
+        if (v && typeof v.host === 'string' && typeof v.at === 'string') {
+            return { host: v.host, at: v.at };
+        }
+        return null;
+    } catch (e) {
+        return null;
+    }
+}
+
 function setUnpluggedFlag(resumeAtIso) {
     fs.writeFileSync(UNPLUGGED_FLAG_PATH, resumeAtIso || '', 'utf-8');
 }
@@ -226,6 +241,8 @@ async function main() {
         logs: readNewBlockedLogLines(),
         recent_visits: readRecentVisits(),
     };
+    const firstVisit = readFirstVisit();
+    if (firstVisit) body.first_visit = firstVisit;
 
     // If the hub asked for diagnostics last time, attach the event-log tail now.
     const diagPending = fs.existsSync(DIAG_PENDING_PATH);
