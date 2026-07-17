@@ -152,12 +152,12 @@ Next to the "Watcher" folder (one level up):
 FLEET / HUB CONNECTION (remote control + auto-update)
 ═══════════════════════════════════════════════════════════════
 
-Every ~10 minutes the agent (poll-hub.js) reports to the Watcher Fleet hub
+Every ~5 minutes the agent (poll-hub.js) reports to the Watcher Fleet hub
 (the dashboard) and, in the same call, receives instructions. This is how a
 machine is managed WITHOUT UltraViewer. It is a pull model — the machine
 always reaches out; the hub never connects into the machine.
 
-What the hub can do to a machine (all applied on the next poll, ~10 min):
+What the hub can do to a machine (all applied on the next poll, ~5 min):
   - Push the SHARED whitelist. Merged with this PC's local whitelist.txt —
     never overwrites it (design rule 6). Versioned; only downloads on change.
   - "Free internet" (unplug): lift the filter for a set time; reverts on its

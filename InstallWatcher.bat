@@ -172,7 +172,7 @@ if %PROXY_LISTENING% EQU 0 (
 )
 timeout /t 1 /nobreak >nul
 
-REM Step 7: Register with the fleet dashboard hub, and schedule polling every 10 min.
+REM Step 7: Register with the fleet dashboard hub, and schedule polling every 5 min.
 REM Requires WatcherBrain\HubConfig.json (not in git - copy from HubConfig.example.json
 REM and fill in the real enrollment secret before packaging this install). If it's
 REM missing, fleet features (bulk whitelist push, unplug/resume, dashboard visibility,
@@ -192,9 +192,9 @@ if exist "%BRAIN_DIR%\HubConfig.json" (
     )
 
     schtasks /delete /tn "Watcher Fleet Poll" /f >nul 2>&1
-    schtasks /create /tn "Watcher Fleet Poll" /tr "wscript \"%BRAIN_DIR%\RunPollHubHidden.vbs\"" /sc minute /mo 10 /f >nul 2>&1
+    schtasks /create /tn "Watcher Fleet Poll" /tr "wscript \"%BRAIN_DIR%\RunPollHubHidden.vbs\"" /sc minute /mo 5 /f >nul 2>&1
     if %ERRORLEVEL% EQU 0 (
-        echo        [OK] Will check in with the dashboard every 10 minutes
+        echo        [OK] Will check in with the dashboard every 5 minutes
     ) else (
         echo        [WARNING] Could not schedule fleet polling
     )
