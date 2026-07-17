@@ -84,6 +84,7 @@ const PROTECTED_RELATIVE_PATHS = [
     'WatcherBrain/_update',
     'WatcherBrain/machine-name.txt',
     'WatcherBrain/machine-zone.txt',
+    'WatcherBrain/machine-code.txt',
     '.git',
 ];
 

@@ -54,6 +54,7 @@ async function registerIfNeeded() {
     const hardwareId = getHardwareId();
     const customName = readTrimmedFile(path.join(__dirname, '..', 'machine-name.txt'));
     const zone = readTrimmedFile(path.join(__dirname, '..', 'machine-zone.txt'));
+    const bancaCode = readTrimmedFile(path.join(__dirname, '..', 'machine-code.txt'));
 
     const result = await postJson(config.HubUrl, '/api/agent/register', {
         enrollment_secret: config.EnrollmentSecret,
@@ -61,6 +62,7 @@ async function registerIfNeeded() {
         hardware_id: hardwareId,
         custom_name: customName,
         zone,
+        banca_code: bancaCode,
     });
 
     if (!result || !result.machine_id || !result.credential) {
