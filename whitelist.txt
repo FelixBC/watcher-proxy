@@ -108,9 +108,18 @@ chat.openai.com
 printers.apk.lol
 premierlotto.apk.lol
 
-# Qpay
+# Qpay / Opay (players de resultados que konfyanslotto incrusta al imprimir;
+# konfyanslotto llama estas URLs para sus resultados automáticos)
 qpay.tv
 player.qpay.tv
+opay.tv
+player.opay.tv
+
+# Correo (Nelson lo pidió)
+hotmail.com
+outlook.com
+live.com
+office.com
 
 # LottoCompany transform URLS so we need to add the main URL api.lotocompany for the dependent ones to work.
 # api.lotocompany.com/api/v1/sessions/params?domain=nationlk.com

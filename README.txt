@@ -152,12 +152,12 @@ Next to the "Watcher" folder (one level up):
 FLEET / HUB CONNECTION (remote control + auto-update)
 ═══════════════════════════════════════════════════════════════
 
-Every ~5 minutes the agent (poll-hub.js) reports to the Watcher Fleet hub
+Every ~2 minutes the agent (poll-hub.js) reports to the Watcher Fleet hub
 (the dashboard) and, in the same call, receives instructions. This is how a
 machine is managed WITHOUT UltraViewer. It is a pull model — the machine
 always reaches out; the hub never connects into the machine.
 
-What the hub can do to a machine (all applied on the next poll, ~5 min):
+What the hub can do to a machine (all applied on the next poll, ~2 min):
   - Push the SHARED whitelist. Merged with this PC's local whitelist.txt —
     never overwrites it (design rule 6). Versioned; only downloads on change.
   - "Free internet" (unplug): lift the filter for a set time; reverts on its
@@ -170,7 +170,7 @@ What the hub can do to a machine (all applied on the next poll, ~5 min):
     backs up, swaps files, restarts, health-checks, and rolls back on failure.
 
 Auto-update safety (self-update.js):
-  - Single-flight LOCK: only one update runs at a time (poll fires every 5 min
+  - Single-flight LOCK: only one update runs at a time (poll fires every 2 min
     but an update can take longer); stale lock ignored after 20 min.
   - Download retries (3x) + clean rollback if it still fails.
   - GOLDEN RULE holds: normal internet is set BEFORE the proxy is touched, so

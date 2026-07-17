@@ -35,10 +35,10 @@ const NET_STATE_PATH = path.join(BRAIN_DIR, 'net-state.txt');
 // tail and clears it. Two-cycle handshake keeps it dead simple and pull-only.
 const DIAG_PENDING_PATH = path.join(BRAIN_DIR, 'diag-pending.flag');
 
-// Spread hub hits across this window (anti-thundering-herd). 90s is well under
-// the ~5-min poll cadence and the 12-min "stale" threshold, so it decorrelates
-// machines without ever risking one looking offline.
-const POLL_JITTER_MS = 90 * 1000;
+// Spread hub hits across this window (anti-thundering-herd). Sized to the ~2-min
+// poll cadence: 30s decorrelates machines that fired together without stretching
+// the effective interval much, and stays well under the "stale" threshold.
+const POLL_JITTER_MS = 30 * 1000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function checkTcpOpen(host, port, timeoutMs) {
