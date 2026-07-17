@@ -38,7 +38,7 @@ agente en runtime **no** están en git; ver la última sección.)
 - `DownloadNode.ps1` — baja el Node embebido a `WatcherBrain/node/` (carpeta autocontenida).
 
 ## Hub / flota (hablar con el dashboard watcher-fleet)
-- `poll-hub.js` — el reporte cada ~5 min: manda estado (internet, proxy, filtro, bloqueos, visitas), registra transiciones de internet, y recibe instrucciones (whitelist, unplug, nombre/zona, versión, diagnóstico).
+- `poll-hub.js` — el reporte cada ~10 min: manda estado (internet, proxy, filtro, bloqueos, visitas), registra transiciones de internet, y recibe instrucciones (whitelist, unplug, nombre/zona, versión, diagnóstico).
 - `register-with-hub.js` — enrolamiento: cambia el secreto de enrolamiento por una credencial por-máquina (se hashea del lado servidor).
 - `hub-client.js` — helpers HTTPS para hablar con el hub (módulo `https` nativo, sin librerías).
 - `HubConfig.example.json` — plantilla (URL del hub + secreto). El real `HubConfig.json` está **gitignored** (secreto) — se crea al empaquetar.
