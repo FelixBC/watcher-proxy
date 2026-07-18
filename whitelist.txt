@@ -121,5 +121,11 @@ outlook.com
 live.com
 office.com
 
+# El propio hub de Watcher Fleet (red de seguridad; el agente ya usa https
+# directo que no pasa por el proxy, pero por si alguna config enruta tráfico).
+watcher-fleet.vercel.app
+vercel.app
+supabase.co
+
 # LottoCompany transform URLS so we need to add the main URL api.lotocompany for the dependent ones to work.
 # api.lotocompany.com/api/v1/sessions/params?domain=nationlk.com
