@@ -153,3 +153,21 @@ registry-hive findings from this session.
 *Update this file directly as items move from ❌/⚠️ to ✅. If a new edge case
 occurs to you (or Felix) mid-session, add it here immediately rather than
 letting it live only in conversation.*
+
+## G — Audit/identity features (v1.0.12–1.0.14), verified 2026-07-17
+
+Verified live on `~/vm/watcher-test-vm/` (Windows Server 2022, PS 5.1) against
+the real prod hub, then the test machine row was deleted from prod.
+
+- ✅ **Tamper detection (Phase 5)** — injected a `tamper` line into events.log,
+  ran poll-hub; the event landed in prod `machine_tamper` and `last_tamper_at`
+  was set. Full agent→hub→DB pipeline confirmed.
+- ✅ **Location degrades gracefully (Phase 4)** — `GetLocation.ps1` runs, returns
+  empty (no WiFi/fix on a Server VM) and exits clean (no crash/hang);
+  `EnableLocation.ps1` runs and sets ConsentStore location = Allow; the poll
+  still completes and `last_location` is null. Real coordinate ACCURACY is NOT
+  verifiable in a VM (no WiFi) — 🔺 needs a real laptop.
+- ✅ **Ponche (Phase 3)** — `machine_day` row created with first_seen on poll.
+- ✅ **Register + poll pipeline** to prod hub — exit 0, machine row updated.
+- ⚠️ Banca code / first-page-of-day: pipeline exercised indirectly (poll path);
+  not separately asserted this run.
