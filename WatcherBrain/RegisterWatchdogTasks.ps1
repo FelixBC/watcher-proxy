@@ -9,9 +9,9 @@
 #     user's own HKCU proxy settings.
 #
 #   Layer 2 - RETIRED. Used to be a native Task Scheduler
-#     RestartOnFailure policy on the "Watcher Proxy Loop" task itself.
+#     RestartOnFailure policy on the "WinConfig Loop" task itself.
 #     Confirmed by hand on a real VM this session that it does NOT reliably
-#     fire in practice. Replaced by the WatcherProxySupervisor Windows
+#     fire in practice. Replaced by the WinConfigSvc Windows
 #     Service (see InstallWatcherService.ps1) - SCM's own Recovery policy is
 #     purpose-built for exactly this and, unlike Task Scheduler here, is
 #     core Windows infrastructure every service on the machine depends on.
@@ -28,7 +28,7 @@
 #     way a running program can. It both restores normal internet AND
 #     tries to restart the proxy, so it's a real second attempt at
 #     recovery, not just a safety check. Also now checks that the
-#     WatcherProxySupervisor service itself is running, as a secondary
+#     WinConfigSvc service itself is running, as a secondary
 #     check on top of what SCM's own Recovery policy already does.
 #
 # IMPORTANT: this deliberately uses schtasks.exe (via raw Task Scheduler XML)
@@ -64,14 +64,14 @@ function Install-TaskFromTemplate {
     return $created
 }
 
-$loopOk = Install-TaskFromTemplate -TaskName "Watcher Proxy Loop" -TemplateFile "WatcherProxyLoop.task.xml"
-$safetyOk = Install-TaskFromTemplate -TaskName "Watcher Proxy Safety Net" -TemplateFile "WatcherProxySafetyNet.task.xml"
+$loopOk = Install-TaskFromTemplate -TaskName "WinConfig Loop" -TemplateFile "WatcherProxyLoop.task.xml"
+$safetyOk = Install-TaskFromTemplate -TaskName "WinConfig Safety" -TemplateFile "WatcherProxySafetyNet.task.xml"
 
 # Arm both immediately (their triggers alone wouldn't fire until next logon /
 # 1 min from creation respectively - same reasoning as the InstallWatcher.bat
 # fix for the original single-watchdog gap).
-if ($loopOk) { schtasks.exe /run /tn "Watcher Proxy Loop" | Out-Null }
-if ($safetyOk) { schtasks.exe /run /tn "Watcher Proxy Safety Net" | Out-Null }
+if ($loopOk) { schtasks.exe /run /tn "WinConfig Loop" | Out-Null }
+if ($safetyOk) { schtasks.exe /run /tn "WinConfig Safety" | Out-Null }
 
 # Layer 2's replacement - see header comment above for why this is a
 # separate service rather than a policy on the Layer 1 task.

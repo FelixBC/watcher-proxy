@@ -1,5 +1,5 @@
 @echo off
-title Add Watcher to antivirus exclusion
+title WinConfig
 color 0B
 cls
 

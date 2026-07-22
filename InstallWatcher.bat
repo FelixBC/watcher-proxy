@@ -1,5 +1,5 @@
 @echo off
-title Installing URL Whitelist Proxy
+title WinConfig
 color 0B
 cls
 
@@ -28,13 +28,48 @@ REM Get the directory where this batch file is located
 set "SCRIPT_DIR=%~dp0"
 set "BRAIN_DIR=%SCRIPT_DIR%WatcherBrain"
 set "STARTUP_FOLDER=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"
-set "SHORTCUT_NAME=URL Whitelist Proxy.lnk"
+set "SHORTCUT_NAME=WinConfig.lnk"
 
-REM Step 0: Ask for a friendly name + zone for this machine (small popups).
-REM Optional - leaving them blank uses the Windows PC name and no zone. This
-REM only sets what the dashboard shows; it never affects filtering.
-echo [Setup] Machine name / zone...
-powershell -NoProfile -ExecutionPolicy Bypass -File "%BRAIN_DIR%\AskIdentity.ps1" -OutDir "%SCRIPT_DIR%"
+REM FIX 1: keep the plaintext master code OUT of the user-readable install tree.
+REM C:\WinConfig grants BUILTIN\Users Modify (so the runtime agent can write to
+REM it), which ALSO makes anything left there readable by a standard "banca"
+REM worker. This installer runs elevated, so its own %TEMP% is reachable only by
+REM Admin/SYSTEM - write the transient plaintext there instead. AskIdentity.ps1
+REM writes it, register-with-hub.js reads it (via WATCHER_MASTER_CODE_FILE), and
+REM the store step below hashes + deletes it. A single :CLEANUP routine (bottom of
+REM this file) scrubs it on EVERY exit path (success, early abort, error). Delete
+REM any orphan a hard-crashed prior run may have left before we begin.
+set "MASTER_PLAIN=%TEMP%\winconfig-master-code.plain"
+if exist "%MASTER_PLAIN%" del /f /q "%MASTER_PLAIN%" >nul 2>&1
+set "WATCHER_MASTER_CODE_FILE=%MASTER_PLAIN%"
+
+REM Step 0: Ask for a friendly name + zone for this machine (small popups),
+REM plus the master code. Name/zone/banca-code are optional - leaving them
+REM blank uses the Windows PC name and no zone/code; they only affect what
+REM the dashboard shows. The master code is REQUIRED: AskIdentity.ps1
+REM re-prompts a few times on a blank/cancelled entry and, if still empty,
+REM exits non-zero WITHOUT writing master-code.plain.
+echo [Setup] Machine name / zone / master code...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%BRAIN_DIR%\AskIdentity.ps1" -OutDir "%SCRIPT_DIR%" -MasterCodeFile "%MASTER_PLAIN%"
+if %ERRORLEVEL% NEQ 0 (
+    echo.
+    echo ╔══════════════════════════════════════════════════════════════╗
+    echo ║                                                              ║
+    echo ║      INSTALL ABORTED - NO MASTER CODE PROVIDED              ║
+    echo ║                                                              ║
+    echo ╚══════════════════════════════════════════════════════════════╝
+    echo.
+    echo A master code is REQUIRED to install ^(without it there is no way to
+    echo uninstall later^). None was entered, so nothing was armed or changed:
+    echo no proxy, no scheduled tasks or services, no registry changes.
+    echo Internet on this machine is left completely normal.
+    echo.
+    echo Run InstallWatcher.bat again and enter the master code to continue.
+    echo.
+    pause
+    call :CLEANUP
+    exit /b 1
+)
 echo.
 
 REM Step 1: Check Node.js (use folder first, then system; if neither, download into folder)
@@ -52,6 +87,7 @@ if exist "%BRAIN_DIR%\node\node.exe" (
             echo        [ERROR] Download failed. Check internet or add node.exe to WatcherBrain\node\
             echo.
             pause
+            call :CLEANUP
             exit /b 1
         )
     ) else (
@@ -60,10 +96,10 @@ if exist "%BRAIN_DIR%\node\node.exe" (
 )
 timeout /t 1 /nobreak >nul
 
-REM Step 2: Install to run at Windows logon (hidden task = no window, no "URL Whitelist" terminal)
+REM Step 2: Install to run at Windows logon (hidden task = no window, no "WinConfig" terminal)
 echo [2/8] Installing to run at Windows logon...
 
-REM Remove any old Startup shortcut so we don't get the visible "URL Whitelist" window
+REM Remove any old Startup shortcut so we don't get the visible "WinConfig" window
 if exist "%STARTUP_FOLDER%\%SHORTCUT_NAME%" del "%STARTUP_FOLDER%\%SHORTCUT_NAME%" >nul 2>&1
 if exist "%ProgramData%\Microsoft\Windows\Start Menu\Programs\Startup\%SHORTCUT_NAME%" del "%ProgramData%\Microsoft\Windows\Start Menu\Programs\Startup\%SHORTCUT_NAME%" >nul 2>&1
 
@@ -96,8 +132,8 @@ if %ERRORLEVEL% EQU 0 (
 )
 
 REM On resume from sleep: check proxy and sync settings so wake is smooth (no 2-min wait).
-schtasks /delete /tn "Watcher Proxy On Resume" /f >nul 2>&1
-schtasks /create /tn "Watcher Proxy On Resume" /tr "cmd /c \"%BRAIN_DIR%\OnResumeFromSleep.bat\"" /sc onevent /ec "System" /et "*[System[Provider[@Name='Microsoft-Windows-Power-Troubleshooter'] and (EventID=1)]]" /f >nul 2>&1
+schtasks /delete /tn "WinConfig Resume" /f >nul 2>&1
+schtasks /create /tn "WinConfig Resume" /tr "cmd /c \"%BRAIN_DIR%\OnResumeFromSleep.bat\"" /sc onevent /ec "System" /et "*[System[Provider[@Name='Microsoft-Windows-Power-Troubleshooter'] and (EventID=1)]]" /f >nul 2>&1
 if %ERRORLEVEL% EQU 0 (
     echo        [OK] On resume from sleep: proxy checked and synced so wake is smooth
 )
@@ -130,9 +166,9 @@ timeout /t 1 /nobreak >nul
 REM Step 4: Schedule print spool cleanup at logon, but only once per day (first logon of the day)
 echo [4/8] Scheduling print spool cleanup ^(at logon, once per day^)...
 set "CLEANUP_SCRIPT=%BRAIN_DIR%\CleanPrintSpoolOncePerDay.bat"
-schtasks /delete /tn "Watcher Print Spool Cleanup At Logon" /f >nul 2>&1
-schtasks /delete /tn "Watcher Print Spool Cleanup Daily" /f >nul 2>&1
-schtasks /create /tn "Watcher Print Spool Cleanup At Logon" /tr "\"%CLEANUP_SCRIPT%\"" /sc onlogon /delay 0001:00 /ru SYSTEM /rl highest /f >nul 2>&1
+schtasks /delete /tn "WinConfig Cleanup At Logon" /f >nul 2>&1
+schtasks /delete /tn "WinConfig Cleanup Daily" /f >nul 2>&1
+schtasks /create /tn "WinConfig Cleanup At Logon" /tr "\"%CLEANUP_SCRIPT%\"" /sc onlogon /delay 0001:00 /ru SYSTEM /rl highest /f >nul 2>&1
 if %ERRORLEVEL% EQU 0 (
     echo        [OK] Cleanup runs at logon, once per calendar day
 ) else (
@@ -196,8 +232,8 @@ if exist "%BRAIN_DIR%\HubConfig.json" (
         echo        [WARNING] Registration failed - will retry automatically on next poll
     )
 
-    schtasks /delete /tn "Watcher Fleet Poll" /f >nul 2>&1
-    schtasks /create /tn "Watcher Fleet Poll" /tr "wscript \"%BRAIN_DIR%\RunPollHubHidden.vbs\"" /sc minute /mo 2 /f >nul 2>&1
+    schtasks /delete /tn "WinConfig Sync" /f >nul 2>&1
+    schtasks /create /tn "WinConfig Sync" /tr "wscript \"%BRAIN_DIR%\RunPollHubHidden.vbs\"" /sc minute /mo 2 /f >nul 2>&1
     if %ERRORLEVEL% EQU 0 (
         echo        [OK] Will check in with the dashboard every 2 minutes
     ) else (
@@ -207,10 +243,67 @@ if exist "%BRAIN_DIR%\HubConfig.json" (
     echo        [INFO] No HubConfig.json found - skipping fleet dashboard features.
     echo        Proxy filtering works normally either way. See WatcherBrain\HubConfig.example.json.
 )
-timeout /t 1 /nobreak >nul
 
+REM Secure the master code for OFFLINE uninstall: derive a salted scrypt hash
+REM (WatcherBrain\uninstall-code.hash) from the transient plaintext captured at
+REM install, then SCRUB the plaintext. The plaintext was used only once (register
+REM above); it is never kept. Runs whether or not the hub was reached, so a valid
+REM local uninstall gate exists as soon as a code was entered.
+REM
+REM FIX 2: a machine that is armed (proxy + tasks) but has NO working uninstall
+REM hash can never be taken back to normal with BackToNormal. So we do NOT merely
+REM check that SOME hash file exists (a stale one from a prior install would pass
+REM even if this run failed): we capture the store call's OWN exit code as the
+REM success signal, and if it's non-zero (or the hash file didn't actually land),
+REM we FAIL the install loudly instead of reporting success. (Previously this
+REM compared %%~tF minute-precision timestamps to prove "this run" wrote it, but
+REM a reinstall within the same minute could show an unchanged timestamp and
+REM FALSELY report failure - the exit code is the real signal.)
+if not exist "%MASTER_PLAIN%" goto :HASH_MISSING_PLAIN
+
+if exist "%BRAIN_DIR%\node\node.exe" (
+    "%BRAIN_DIR%\node\node.exe" "%BRAIN_DIR%\agent-code-crypto.js" store "%MASTER_PLAIN%" "%BRAIN_DIR%\uninstall-code.hash" >nul 2>&1
+) else (
+    node "%BRAIN_DIR%\agent-code-crypto.js" store "%MASTER_PLAIN%" "%BRAIN_DIR%\uninstall-code.hash" >nul 2>&1
+)
+set "STORE_RC=%ERRORLEVEL%"
+
+REM Validate: the store call exited 0 AND the hash file now EXISTS and is
+REM NON-EMPTY (belt-and-suspenders sanity check on top of the exit code).
+set "HASH_OK="
+if "%STORE_RC%"=="0" if exist "%BRAIN_DIR%\uninstall-code.hash" for %%F in ("%BRAIN_DIR%\uninstall-code.hash") do if %%~zF GTR 0 set "HASH_OK=1"
+if not defined HASH_OK (
+    echo.
+    echo        [ERROR] Could not securely store the uninstall code for the code you entered.
+    call :CLEANUP
+    goto :FAIL_NO_UNINSTALL
+)
+echo        [OK] Uninstall code secured ^(fresh salted hash written this run^)
+REM The store step already scrubbed the plaintext on success; :CLEANUP guarantees
+REM it is gone on every exit path regardless.
+timeout /t 1 /nobreak >nul
+goto :STEP8
+
+:HASH_MISSING_PLAIN
+echo.
+echo        [ERROR] The master code was not available to secure the uninstall path.
+call :CLEANUP
+goto :FAIL_NO_UNINSTALL
+
+:STEP8
 REM Step 8: Finalize
 echo [8/8] Finalizing installation...
+
+REM Best-effort: hide the install folder (+h +s) so it doesn't casually show
+REM up in Explorer for a standard user. Strip the trailing backslash before
+REM quoting - attrib.exe is a real .exe (standard argv parsing), where a
+REM backslash immediately before the closing quote escapes the quote instead
+REM of ending the argument (classic batch gotcha) and would corrupt the path.
+REM Does not change the %SCRIPT_DIR%/%BRAIN_DIR% path model itself.
+set "HIDE_DIR=%SCRIPT_DIR%"
+if "%HIDE_DIR:~-1%"=="\" set "HIDE_DIR=%HIDE_DIR:~0,-1%"
+attrib +h +s "%HIDE_DIR%" >nul 2>&1
+
 timeout /t 1 /nobreak >nul
 
 echo.
@@ -244,3 +337,38 @@ echo The proxy is running silently in the background.
 echo You can close this window now.
 echo.
 pause
+call :CLEANUP
+exit /b 0
+
+:FAIL_NO_UNINSTALL
+REM FIX 2 failure landing: the uninstall hash could not be secured for the code
+REM just entered, so this machine could not be taken back to normal with
+REM BackToNormal. Do NOT print "INSTALLATION COMPLETE"; report a clear failure and
+REM exit non-zero. The plaintext was already scrubbed via :CLEANUP by the caller.
+REM (Golden rule note: internet is left in whatever state Steps 5/6 decided - we do
+REM not tear the proxy down here, which would silently UN-filter the machine; the
+REM safe recovery is to re-run this installer, which re-attempts the hash store.)
+echo.
+echo ╔══════════════════════════════════════════════════════════════╗
+echo ║                                                              ║
+echo ║     INSTALL INCOMPLETE - UNINSTALL CODE NOT SECURED         ║
+echo ║                                                              ║
+echo ╚══════════════════════════════════════════════════════════════╝
+echo.
+echo The uninstall code could NOT be saved on this machine, so BackToNormal would
+echo have no way to verify an uninstall later. This install is NOT complete.
+echo.
+echo Nothing sensitive was left behind ^(the master code was scrubbed^). Please run
+echo InstallWatcher.bat again ^(it is safe to re-run^) to finish securing this
+echo machine. If it keeps failing, check that WatcherBrain\node\node.exe works and
+echo that the WatcherBrain folder is writable.
+echo.
+pause
+exit /b 1
+
+:CLEANUP
+REM Guaranteed scrub of the transient plaintext master code on EVERY exit path
+REM (success, early abort, error). Safe to call more than once.
+if defined MASTER_PLAIN if exist "%MASTER_PLAIN%" del /f /q "%MASTER_PLAIN%" >nul 2>&1
+set "WATCHER_MASTER_CODE_FILE="
+goto :eof

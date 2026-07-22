@@ -26,6 +26,6 @@ function Test-WatchdogLoopRunning {
 while ($true) {
     Start-Sleep -Seconds 5
     if (-not (Test-WatchdogLoopRunning)) {
-        schtasks.exe /run /tn "Watcher Proxy Loop" | Out-Null
+        schtasks.exe /run /tn "WinConfig Loop" | Out-Null
     }
 }

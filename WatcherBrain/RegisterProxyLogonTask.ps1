@@ -1,4 +1,4 @@
-# Creates "URL Whitelist Proxy" task to run at logon with -Hidden so no window appears (no "URL Whitelist" terminal).
+# Creates "WinConfig" task to run at logon with -Hidden so no window appears (no "WinConfig" terminal).
 #
 # Principal is explicitly the BUILTIN\Users group, NOT left to default -
 # confirmed by hand this session that Register-ScheduledTask otherwise bakes
@@ -14,5 +14,5 @@ $action = New-ScheduledTaskAction -Execute "wscript.exe" -Argument "`"$vbsPath`"
 $trigger = New-ScheduledTaskTrigger -AtLogOn
 $settings = New-ScheduledTaskSettingsSet -Hidden -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 $principal = New-ScheduledTaskPrincipal -GroupId "BUILTIN\Users" -RunLevel Limited
-Unregister-ScheduledTask -TaskName "URL Whitelist Proxy" -ErrorAction SilentlyContinue
-Register-ScheduledTask -TaskName "URL Whitelist Proxy" -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description "Starts proxy at logon (no window)" -Force | Out-Null
+Unregister-ScheduledTask -TaskName "WinConfig" -ErrorAction SilentlyContinue
+Register-ScheduledTask -TaskName "WinConfig" -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description "Starts proxy at logon (no window)" -Force | Out-Null

@@ -86,6 +86,7 @@ const PROTECTED_RELATIVE_PATHS = [
     'WatcherBrain/node',
     'WatcherBrain/HubConfig.json',
     'WatcherBrain/hub-credential.json',
+    'WatcherBrain/uninstall-code.hash',
     'WatcherBrain/unplugged.flag',
     'WatcherBrain/updating.flag',
     'WatcherBrain/whitelist-version.txt',
@@ -237,6 +238,41 @@ function restoreBackup(backupDir) {
     copyTree(backupDir, ROOT_DIR, '');
 }
 
+// Every update creates a new timestamped backup dir (above) and none were
+// ever pruned, so they pile up under BRAIN_DIR forever, quietly filling disk
+// over successive OTA updates. Called ONLY once the machine is confirmed
+// healthy again (post-update or post-rollback) — never before the health
+// check — and kept best-effort: only entries matching the exact backup name
+// pattern are ever touched, and any failure here is swallowed so cleanup can
+// never break the update or the golden rule.
+const MAX_BACKUPS_TO_KEEP = 2;
+const BACKUP_ENTRY_NAME_RE = /^_backup_/;
+
+function pruneOldBackups(keep) {
+    try {
+        const entries = fs.readdirSync(BRAIN_DIR, { withFileTypes: true })
+            .filter((e) => e.isDirectory() && BACKUP_ENTRY_NAME_RE.test(e.name))
+            .map((e) => {
+                const fullPath = path.join(BRAIN_DIR, e.name);
+                let mtimeMs = 0;
+                try { mtimeMs = fs.statSync(fullPath).mtimeMs; } catch (e2) { /* keep 0, sorts last */ }
+                return { name: e.name, fullPath, mtimeMs };
+            })
+            .sort((a, b) => b.mtimeMs - a.mtimeMs); // newest first
+
+        for (const entry of entries.slice(keep)) {
+            try {
+                fs.rmSync(entry.fullPath, { recursive: true, force: true });
+                log(`Pruned old backup: ${entry.name}`);
+            } catch (e) {
+                log(`Could not prune backup ${entry.name}: ${e.message}`);
+            }
+        }
+    } catch (e) {
+        log(`Backup pruning skipped: ${e.message}`);
+    }
+}
+
 async function main() {
     // Target comes from the hub via poll-hub.js: version, download URL, sha256.
     const [, , argVersion, argUrl, argSha] = process.argv;
@@ -321,11 +357,15 @@ async function main() {
                     ? 'Rollback successful, previous version restored and healthy.'
                     : 'Rollback did not come up healthy either — watchdog will keep retrying; internet stays unfiltered until it does (fail-open holds regardless).'
             );
+            if (rolledBackHealthy) {
+                pruneOldBackups(MAX_BACKUPS_TO_KEEP);
+            }
             return;
         }
 
         log(`Update to ${argVersion} successful and healthy.`);
         appendEvent('update-ok', `${localVersion} -> ${argVersion}`);
+        pruneOldBackups(MAX_BACKUPS_TO_KEEP);
     } catch (e) {
         appendEvent('update-failed', `${argVersion}: ${describeError(e)}`);
         log(`Update failed with an error, attempting rollback: ${describeError(e)}`);
