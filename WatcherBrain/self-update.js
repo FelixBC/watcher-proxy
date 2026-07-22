@@ -36,6 +36,17 @@ const UPDATE_DIR = path.join(BRAIN_DIR, '_update');
 const LOCK_PATH = path.join(BRAIN_DIR, 'update.lock');
 const LOCK_STALE_MS = 20 * 60 * 1000;
 
+// Raised for the risky window (flip -> stop proxy -> copy -> restart) and
+// cleared in finally. Every watchdog layer honors it: SetProxyByAvailability
+// forces NORMAL internet while it exists (so it never re-points Windows at the
+// proxy we're about to kill), and WatchdogLoop / CheckAndStartProxy leave the
+// proxy alone. This is what actually holds the GOLDEN RULE during an update —
+// the single upfront flipToNormalInternet() is otherwise undone within ~5s by
+// the watchdog re-enabling the proxy the instant it sees it still listening,
+// after which we kill the proxy for the copy and Windows is left pointing at a
+// dead 127.0.0.1:8080 = internet fully down.
+const UPDATING_FLAG_PATH = path.join(BRAIN_DIR, 'updating.flag');
+
 function acquireLock() {
     try {
         if (fs.existsSync(LOCK_PATH)) {
@@ -76,6 +87,7 @@ const PROTECTED_RELATIVE_PATHS = [
     'WatcherBrain/HubConfig.json',
     'WatcherBrain/hub-credential.json',
     'WatcherBrain/unplugged.flag',
+    'WatcherBrain/updating.flag',
     'WatcherBrain/whitelist-version.txt',
     'WatcherBrain/poll-log-cursor.txt',
     'WatcherBrain/blocked-requests.log',
@@ -273,7 +285,13 @@ async function main() {
             log('Checksum OK.');
         }
 
-        // GOLDEN RULE: normal internet before the proxy is touched.
+        // GOLDEN RULE: normal internet before the proxy is touched. Raise the
+        // updating flag FIRST (before the flip) so every watchdog layer forces
+        // normal internet and keeps its hands off the proxy for the whole swap.
+        // Without it, the watchdog re-enables the proxy the moment it sees it
+        // still listening, then we kill it for the copy and Windows is left
+        // pointing at a dead proxy. Cleared in finally.
+        fs.writeFileSync(UPDATING_FLAG_PATH, new Date().toISOString(), 'utf-8');
         flipToNormalInternet();
         stopProxyAndWatchdog();
 
@@ -320,6 +338,10 @@ async function main() {
             log(`Rollback itself failed: ${rollbackErr.message}. Watchdog remains responsible for fail-open safety.`);
         }
     } finally {
+        // Cleared only now — the proxy is healthy again (or rollback restored
+        // it / left it down = fail-open). Dropping the flag lets the next
+        // watchdog cycle restore filtering (PE=1) if the proxy is up.
+        try { fs.unlinkSync(UPDATING_FLAG_PATH); } catch (e) {}
         try { fs.rmSync(UPDATE_DIR, { recursive: true, force: true }); } catch (e) {}
         releaseLock();
     }

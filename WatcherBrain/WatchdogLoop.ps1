@@ -15,6 +15,7 @@ $StartWatcherPath = Join-Path $BrainDir 'StartWatcher.vbs'
 $SafetyScript = Join-Path $BrainDir 'SetProxyByAvailability.ps1'
 $PidFile = Join-Path $BrainDir 'watchdog_loop.pid'
 $UnpluggedFlagPath = Join-Path $BrainDir 'unplugged.flag'
+$UpdatingFlagPath = Join-Path $BrainDir 'updating.flag'
 $EventsPath = Join-Path $BrainDir 'events.log'
 
 # Write PID so BackToNormal can stop this loop
@@ -115,6 +116,17 @@ while ($true) {
         }
         Stop-ProxyProcessOnly
         continue  # do NOT restart the proxy while unplugged
+    }
+
+    # GOLDEN RULE: while self-update.js is applying an update it owns the proxy
+    # lifecycle (it kills the proxy to swap files, then rebuilds it). Stay out
+    # of its way: force NORMAL internet (SetProxyByAvailability honors the same
+    # flag) and do NOT restart the proxy here, or we'd fight the file swap and
+    # could re-point Windows at a half-dead proxy. self-update clears the flag
+    # when it finishes and the next cycle restores filtering.
+    if (Test-Path $UpdatingFlagPath) {
+        if (Test-Path $SafetyScript) { & $SafetyScript | Out-Null }
+        continue
     }
 
     $proxyUp = Test-ProxyListening

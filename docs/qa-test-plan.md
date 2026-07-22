@@ -72,18 +72,51 @@ registry-flip step).
 - ❌ Duplicate/replayed registration attempts with the same enrollment secret
 - ❌ Concurrent whitelist edits by two dashboard sessions at once
 
-## E — Self-update (the open bug thread — see handoff section for detail)
+## E — Self-update
 
-- 🔺 **Priority**: re-run the full self-update flow on a different VM config
-  or real hardware to determine if the registry-flip failure is this VM's
-  TCG emulation specifically, or a real remaining bug
+- ✅ **Silent-crash FIXED — verified end-to-end 2026-07-21.** Real hub→poll→
+  self-update run on the VM (agent on 1.0.13 fixed code, hub serving 1.0.14):
+  full clean sequence in `update.log` — `Backed up` → download 200 (93174 B)
+  → `Checksum OK` → `New files copied in` → `Update to 1.0.14 successful and
+  healthy` → `Process exiting with code 0`. Reproduced 2/2 runs, ended at
+  VERSION=1.0.14, port 8080 healthy, lock released. The old silent-death
+  signature (process gone after "Backed up"/"Checksum OK", no exit line) is
+  GONE. NOTE: an apparent "death after Checksum OK" seen mid-session was a
+  TEST-HARNESS artifact — triggering `poll-hub` over SSH let the SSH session
+  teardown orphan-kill the detached self-update child; keeping the session
+  alive (or the real scheduled-task path) completes cleanly.
 - ⚠️ Version-check/backup/download/extract — verified working in isolation
 - ❌ Self-update when the "new" version has a bug that fails its own health
   check (does rollback actually restore full function, not just files?)
-- ⚠️ GitHub unreachable mid-download — fails safely (verified once, worth
+- ⚠️ GitHub/hub unreachable mid-download — fails safely (verified once, worth
   re-confirming after the reg.exe fix)
-- ❌ Self-update racing with the watchdog or Safety Net simultaneously trying
-  to restart the proxy — possible double-start or state confusion?
+- ✅ **GOLDEN-RULE VIOLATION FOUND & FIXED — self-update racing the watchdog/
+  Safety Net. Bug confirmed 2/2, fix verified 2/2 on the VM 2026-07-21.** Second-by-second registry+
+  port timeline during the update:
+  `PE=1/PS=127.0.0.1:8080/up` → self-update `flipToNormalInternet` → `PE=0/
+  PS=<none>/up` (correct, ~1s) → watchdog/SafetyNet re-asserts → `PE=1/PS=
+  127.0.0.1:8080/up` (flip UNDONE while proxy briefly still up) → proxy dies
+  for the file-copy → **`PE=1/PS=127.0.0.1:8080/DOWN` for ~13–22s = all
+  browser traffic routed to a dead proxy = internet FULLY DOWN** → recovers
+  when self-update restarts the proxy. Root cause: self-update's single
+  upfront flip-to-normal is transient (the still-running watchdog re-enables
+  filtering because the proxy is momentarily still up), and self-update then
+  STOPS the watchdog — removing the normal fail-open safety net exactly when
+  it kills the proxy for the copy. So nothing forces PE=0 while the proxy is
+  dead. FIX (implemented + verified, shipped as v1.0.15): an `updating.flag`
+  mirroring `unplugged.flag`. self-update.js raises it right before the flip
+  and clears it in `finally`; **SetProxyByAvailability.ps1** (the only place
+  PE=1 is ever set) treats the flag as "proxy down" → always forces NORMAL
+  internet, so the watchdog can no longer re-enable the proxy mid-update; and
+  **WatchdogLoop.ps1** + **CheckAndStartProxy.ps1** honor it like the unplug
+  path (force normal internet, do NOT restart the proxy). VERIFIED 2/2 on the
+  VM (1.0.14→1.0.15): second-by-second timeline shows the whole ~20s
+  proxy-down copy window at `PE=0 / ProxyServer=<none>` = direct internet UP,
+  **0 danger samples** (vs ~13–22s of internet-down before the fix); update
+  still completes healthy, flag cleared, filtering restored after. Caveat:
+  this VM is the 1.0.0-era install + synced current code; the racing
+  interaction is code-level (not install-specific), but a FRESH 1.0.15
+  install is still worth a confirming run before rollout.
 
 ## F — Multi-user PCs (admin installer account ≠ worker "banca" account)
 
