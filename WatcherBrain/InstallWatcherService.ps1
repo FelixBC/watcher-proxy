@@ -7,7 +7,7 @@
 # to the SYSTEM-vs-user-registry problem this script's own process (running
 # as LocalSystem) has to avoid - see SupervisorService.ps1's header.
 #
-# Safe to re-run: uninstalls any existing WatcherProxySupervisor service
+# Safe to re-run: uninstalls any existing WinConfigSvc service
 # first, matching the idempotent pattern RegisterWatchdogTasks.ps1 already
 # uses for its own tasks.
 param([Parameter(Mandatory=$true)] [string] $BrainDir)
@@ -30,6 +30,16 @@ $xml = Get-Content -Path $winswXmlSrc -Raw
 $xml = $xml.Replace('__BRAIN_DIR__', $BrainDir)
 Set-Content -Path $winswXmlDest -Value $xml -Encoding UTF8
 
+# LEGACY cleanup: before the WinConfig rename, this service was registered
+# under the literal id "WatcherProxySupervisor" (see WatcherProxySupervisor.xml's
+# <id>, later changed to WinConfigSvc). A machine ever upgraded from that
+# older install could still have it registered and running, duplicating (and
+# fighting) the WinConfigSvc install below. Best-effort only: sc.exe returns
+# non-zero when the service doesn't exist, which is the normal/expected case
+# on a fresh install - ignore it, same as the idempotent stop/uninstall below.
+sc.exe stop "WatcherProxySupervisor" 2>$null | Out-Null
+sc.exe delete "WatcherProxySupervisor" 2>$null | Out-Null
+
 # Stop/uninstall any previous instance first (idempotent re-run).
 & $winswExe stop | Out-Null
 & $winswExe uninstall | Out-Null
@@ -45,9 +55,9 @@ if ($LASTEXITCODE -ne 0) {
 # failure count after 1 failure-free day. This is what Layer 2 was trying
 # (and, per real testing this session, failing) to approximate with Task
 # Scheduler's RestartOnFailure.
-sc.exe failure WatcherProxySupervisor reset= 86400 actions= restart/0/restart/60000/restart/60000 | Out-Null
-sc.exe failureflag WatcherProxySupervisor 1 | Out-Null
-sc.exe config WatcherProxySupervisor start= auto | Out-Null
+sc.exe failure WinConfigSvc reset= 86400 actions= restart/0/restart/60000/restart/60000 | Out-Null
+sc.exe failureflag WinConfigSvc 1 | Out-Null
+sc.exe config WinConfigSvc start= auto | Out-Null
 
 & $winswExe start
 if ($LASTEXITCODE -ne 0) {

@@ -12,6 +12,12 @@ last_spool_cleanup_day.txt
 # credential issued back on registration. See WatcherBrain/HubConfig.example.json.
 WatcherBrain/HubConfig.json
 WatcherBrain/hub-credential.json
+# Transient plaintext master code (written at repo root by AskIdentity.ps1,
+# scrubbed by the installer after enroll) and the per-machine salted uninstall
+# hash (in WatcherBrain). Bare names so they match wherever they land. Neither
+# must ever be committed.
+master-code.plain
+uninstall-code.hash
 WatcherBrain/unplugged.flag
 WatcherBrain/whitelist-version.txt
 WatcherBrain/poll-log-cursor.txt

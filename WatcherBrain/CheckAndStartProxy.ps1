@@ -3,14 +3,14 @@
 # We call SetProxyByAvailability.ps1 to set proxy OFF, then start Node in the background.
 #
 # Called from: OnResumeFromSleep.bat, and (as of the 3-layer redundancy
-# design) the independent "Watcher Proxy Safety Net" scheduled task, every
+# design) the independent "WinConfig Safety" scheduled task, every
 # 1 minute. Must honor unplugged.flag the same way WatchdogLoop.ps1 does -
 # otherwise this would fight Nelson's own "give free internet" button by
 # trying to restart the proxy during an intentional unplug.
 #
 # ALSO restarts WatchdogLoop.ps1 itself if it isn't running. This was
-# supposed to be Task Scheduler's own job (RestartOnFailure on the "Watcher
-# Proxy Loop" task) - confirmed by hand on a real VM that this does NOT
+# supposed to be Task Scheduler's own job (RestartOnFailure on the "WinConfig
+# Loop" task) - confirmed by hand on a real VM that this does NOT
 # reliably fire in practice, even with the task's action set to the
 # long-running process directly. Rather than depend on an OS feature that
 # didn't behave as documented here, this script - already proven to run
@@ -59,14 +59,14 @@ if (-not (Test-WatchdogLoopRunning)) {
 }
 
 # Secondary check on top of SCM's own Recovery policy (which supervises this
-# service - see InstallWatcherService.ps1): if the WatcherProxySupervisor
+# service - see InstallWatcherService.ps1): if the WinConfigSvc
 # service itself somehow isn't running, this 1-min task tries to start it
 # too. Genuine defense in depth, not a duplicate of the check above - this
 # targets the service that watches Layer 1, not Layer 1 itself.
 try {
-    $svc = Get-Service -Name 'WatcherProxySupervisor' -ErrorAction Stop
+    $svc = Get-Service -Name 'WinConfigSvc' -ErrorAction Stop
     if ($svc.Status -ne 'Running') {
-        Start-Service -Name 'WatcherProxySupervisor' -ErrorAction SilentlyContinue
+        Start-Service -Name 'WinConfigSvc' -ErrorAction SilentlyContinue
     }
 } catch {
     # Service not installed on this machine (e.g. mid-rollout) - nothing to do.

@@ -19,7 +19,6 @@ const net = require('net');
 const { execSync } = require('child_process');
 
 const { BRAIN_DIR, readHubConfig, readCredential, postJson, getText } = require('./hub-client');
-const { registerIfNeeded } = require('./register-with-hub');
 const { applyPushedWhitelist, getReportableExtras } = require('./whitelist-merge');
 const { appendEvent, readAll, pruneByTime } = require('./event-log');
 
@@ -278,8 +277,18 @@ function triggerSelfUpdate(version, url, sha256) {
 }
 
 async function main() {
-    const credentialFile = readCredential();
-    const cred = credentialFile || (await registerIfNeeded());
+    const cred = readCredential();
+    // Not enrolled (no credential on disk). We deliberately do NOT try to
+    // re-register here: enrollment needs the plaintext master code, which is
+    // captured ONCE at install and never persisted (only its scrypt hash is
+    // kept, for uninstall). With no code to send, a re-register is impossible,
+    // so the safe thing is to do NOTHING — make no local changes, never touch
+    // the proxy/registry/whitelist. The machine keeps enforcing whatever state
+    // it already had; the golden rule is untouched.
+    if (!cred) {
+        console.log('poll-hub: not enrolled (no credential); nothing to do.');
+        return;
+    }
     const config = readHubConfig();
 
     // Jitter: wait a random slice of a window BEFORE doing anything with the
