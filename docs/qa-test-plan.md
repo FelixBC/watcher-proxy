@@ -86,8 +86,18 @@ registry-flip step).
   teardown orphan-kill the detached self-update child; keeping the session
   alive (or the real scheduled-task path) completes cleanly.
 - ⚠️ Version-check/backup/download/extract — verified working in isolation
-- ❌ Self-update when the "new" version has a bug that fails its own health
-  check (does rollback actually restore full function, not just files?)
+- ✅ **Rollback VERIFIED end-to-end 2026-07-21 (real hub path, no shortcuts).**
+  Published a genuinely-broken 1.0.16 (valid bundle, proxy throws on startup so
+  8080 never opens), let the VM poll and self-update 1.0.15→1.0.16: download +
+  `Checksum OK` → `New files copied in` → `Post-update health check FAILED —
+  rolling back.` → `Rollback successful, previous version restored and healthy.`
+  → `exit 0`. Ended back at VERSION=1.0.15 with the GOOD proxy (the broken one
+  replaced), port 8080 healthy, filtering restored. Golden rule held through
+  the whole failed-update + rollback: flag-aware timeline shows every
+  proxy-down tick at `updating.flag=1 / PE=0 / ProxyServer=<none>` = direct
+  internet up, 0 danger samples. NOTE: a persistently-broken *latest* would
+  make a real (poll-every-2-min) machine retry→rollback each cycle — heal the
+  hub (re-publish good, or delete the bad release) after any such incident.
 - ⚠️ GitHub/hub unreachable mid-download — fails safely (verified once, worth
   re-confirming after the reg.exe fix)
 - ✅ **GOLDEN-RULE VIOLATION FOUND & FIXED — self-update racing the watchdog/
