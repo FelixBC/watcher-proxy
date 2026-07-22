@@ -3,6 +3,9 @@
 # the user gets internet as soon as this task runs—no waiting for Node to come back. Run every 1 min.
 $ErrorActionPreference = 'SilentlyContinue'
 
+$BrainDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$UpdatingFlag = Join-Path $BrainDir 'updating.flag'
+
 # Use 2s timeout; TcpClient.Connect() with no timeout blocks ~21s when nothing is listening (Windows TCP retransmits).
 function Test-ProxyListening {
     $timeoutMs = 2000
@@ -20,6 +23,15 @@ function Test-ProxyListening {
 }
 
 $proxyUp = Test-ProxyListening
+
+# GOLDEN RULE: during a self-update the proxy is deliberately torn down and
+# rebuilt. If it happens to still be listening at this instant we must NOT
+# re-point Windows at it (PE=1) — self-update is about to kill it for the file
+# swap, which would leave traffic routed at a dead 127.0.0.1:8080 = internet
+# FULLY DOWN. Treat "updating" as proxy-down so this always forces NORMAL
+# internet (fail-open); self-update.js clears the flag once the proxy is
+# healthy again, and the next cycle restores filtering.
+if (Test-Path $UpdatingFlag) { $proxyUp = $false }
 
 if ($proxyUp) {
     # Proxy is running: ensure proxy is ON (restriction active)

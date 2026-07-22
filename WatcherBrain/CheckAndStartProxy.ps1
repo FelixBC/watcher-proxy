@@ -88,6 +88,18 @@ function Test-ProxyListening {
     return $false
 }
 
+# GOLDEN RULE: while self-update.js is applying an update it owns the proxy
+# lifecycle. Do NOT restart the proxy here (that would fight the file swap and
+# could re-point Windows at a half-dead proxy). Force NORMAL internet
+# (SetProxyByAvailability honors the same flag) and get out; self-update
+# rebuilds the proxy and clears the flag when it's done.
+$UpdatingFlagPath = Join-Path $BrainDir 'updating.flag'
+if (Test-Path $UpdatingFlagPath) {
+    $normalScript = Join-Path $BrainDir 'SetProxyByAvailability.ps1'
+    if (Test-Path $normalScript) { & $normalScript | Out-Null }
+    exit 0
+}
+
 if (Test-ProxyListening) {
   exit 0
 }
