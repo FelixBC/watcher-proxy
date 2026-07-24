@@ -40,9 +40,12 @@
     <Priority>7</Priority>
   </Settings>
   <Actions Context="Author">
+    <!-- Launch through wscript + a VBS so CheckAndStartProxy.ps1 runs with no
+         console flash - see WatcherProxyLoop.task.xml for the full reasoning.
+         RunSafetyNetHidden.vbs starts it hidden (WshShell.Run intWindowStyle = 0). -->
     <Exec>
-      <Command>powershell.exe</Command>
-      <Arguments>-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "__BRAIN_DIR__\CheckAndStartProxy.ps1"</Arguments>
+      <Command>wscript.exe</Command>
+      <Arguments>"__BRAIN_DIR__\RunSafetyNetHidden.vbs"</Arguments>
     </Exec>
   </Actions>
 </Task>

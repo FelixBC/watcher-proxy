@@ -21,6 +21,7 @@ const { execSync } = require('child_process');
 const { BRAIN_DIR, readHubConfig, readCredential, postJson, getText } = require('./hub-client');
 const { applyPushedWhitelist, getReportableExtras } = require('./whitelist-merge');
 const { appendEvent, readAll, pruneByTime } = require('./event-log');
+const { readChosenPort } = require('./proxy-port');
 
 const WHITELIST_PATH = path.join(BRAIN_DIR, '..', 'whitelist.txt');
 const VERSION_PATH = path.join(BRAIN_DIR, '..', 'VERSION');
@@ -100,6 +101,37 @@ function readLocalWhitelistVersion() {
 
 function readLocalAgentVersion() {
     return fs.existsSync(VERSION_PATH) ? fs.readFileSync(VERSION_PATH, 'utf-8').trim() : '0.0.0';
+}
+
+// Parse a dotted numeric version ("1.0.16") into comparable parts. Non-numeric
+// or missing segments become 0, so a malformed string degrades to 0.0.0 rather
+// than throwing (this runs on the golden-rule path — never crash the poll).
+function parseVersion(v) {
+    return String(v || '').split('.').map((n) => {
+        const p = parseInt(n, 10);
+        return Number.isFinite(p) ? p : 0;
+    });
+}
+
+// Forward-only OTA: true ONLY when `candidate` is a STRICTLY NEWER version than
+// `current`. Self-update must never move a machine BACKWARD. The old check
+// (`agent_version !== localAgentVersion`) treated any mismatch as an update, so
+// a hub still advertising an OLDER build than a freshly-installed machine would
+// silently DOWNGRADE it — reverting shipped fixes (e.g. a machine on 1.0.16
+// getting pulled back to a 1.0.15 that still had the EADDRINUSE crash loop).
+// Rollback is done by REPUBLISHING the good code under a higher number; bad
+// forward updates are already caught by self-update.js's health-check + rollback.
+function isNewerVersion(candidate, current) {
+    const a = parseVersion(candidate);
+    const b = parseVersion(current);
+    const len = Math.max(a.length, b.length);
+    for (let i = 0; i < len; i++) {
+        const x = a[i] || 0;
+        const y = b[i] || 0;
+        if (x > y) return true;
+        if (x < y) return false;
+    }
+    return false; // equal → not newer
 }
 
 function isLocallyUnplugged() {
@@ -302,7 +334,7 @@ async function main() {
 
     const [internetReachable, proxyRunning] = await Promise.all([
         checkInternetReachable(),
-        checkTcpOpen('127.0.0.1', 8080, 2000),
+        checkTcpOpen('127.0.0.1', readChosenPort(), 2000),
     ]);
     const unplugged = isLocallyUnplugged();
     // Filter is only meaningfully "active" if the proxy is up AND we're not
@@ -383,7 +415,7 @@ async function main() {
     const localAgentVersion = readLocalAgentVersion();
     if (
         response.agent_version &&
-        response.agent_version !== localAgentVersion &&
+        isNewerVersion(response.agent_version, localAgentVersion) &&
         response.agent_download_url
     ) {
         triggerSelfUpdate(response.agent_version, response.agent_download_url, response.agent_sha256);

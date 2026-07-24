@@ -101,8 +101,7 @@ EXCLUDE_PATHS=(
     "scripts/build-winconfig-bundle.sh"
     "README.txt"
     "ARCHITECTURE.md"
-    "docs/plans/0001-fleet-dashboard.md"
-    "docs/qa-test-plan.md"
+    "docs"
 )
 
 is_excluded() {

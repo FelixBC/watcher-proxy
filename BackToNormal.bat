@@ -31,6 +31,13 @@ REM + teardown below. The gate is BEFORE the Part-A / Part-B split, so neither
 REM path proceeds on a bad code.
 REM ============================================================================
 set "HASH_FILE=%BRAIN_DIR%\uninstall-code.hash"
+REM Emergency code (fleet-wide, baked in the bundle as a salted scrypt hash - NO
+REM plaintext). Accepted IN ADDITION to the per-machine master code, so a machine
+REM can ALWAYS be taken back to normal even with no internet and no master code on
+REM hand (anti-brick). The destructive teardown still needs admin/UAC, so this code
+REM alone in a standard user's hands can't actually uninstall - it only opens the
+REM gate (which then requires elevation to finish).
+set "EMERGENCY_HASH=%BRAIN_DIR%\emergency-code.hash"
 set "NODE_EXE=node"
 if exist "%BRAIN_DIR%\node\node.exe" set "NODE_EXE=%BRAIN_DIR%\node\node.exe"
 
@@ -47,19 +54,31 @@ if errorlevel 1 goto :GATE_DENIED_NOADMIN
 goto :GATE_OK
 
 :GATE_ASK
-REM FAIL-CLOSED: no salted hash on disk = nothing to verify against = deny.
-if not exist "%HASH_FILE%" goto :GATE_NO_HASH
+REM FAIL-CLOSED: with NEITHER a master hash NOR the emergency hash there is nothing
+REM to verify against = deny.
+if not exist "%HASH_FILE%" if not exist "%EMERGENCY_HASH%" goto :GATE_NO_HASH
 echo.
-echo Para desinstalar necesitas el codigo maestro.
-REM Read straight into the env var (never onto the command line, so it stays out
-REM of the process list), verify via node, then clear it immediately.
+echo Para restaurar necesitas el codigo maestro (o el codigo de emergencia).
+REM Read straight into the env var (never onto the command line, so it stays out of
+REM the process list), verify via node, then clear it immediately. Accept EITHER the
+REM per-machine master code OR the emergency code - either one opens the gate. A
+REM subroutine is used so each verify's exit code is captured cleanly (no batch
+REM delayed-expansion traps).
 set "WATCHER_UNINSTALL_CODE="
 set /p "WATCHER_UNINSTALL_CODE=Escribe el codigo y presiona Enter: "
-"%NODE_EXE%" "%BRAIN_DIR%\agent-code-crypto.js" verify "%HASH_FILE%"
-set "VERIFY_RC=%ERRORLEVEL%"
+set "VERIFY_RC=1"
+if exist "%HASH_FILE%" call :TRY_VERIFY "%HASH_FILE%"
+if not "%VERIFY_RC%"=="0" if exist "%EMERGENCY_HASH%" call :TRY_VERIFY "%EMERGENCY_HASH%"
 set "WATCHER_UNINSTALL_CODE="
 if not "%VERIFY_RC%"=="0" goto :GATE_BAD_CODE
 goto :GATE_OK
+
+:TRY_VERIFY
+REM Verify WATCHER_UNINSTALL_CODE against the hash in %1; set VERIFY_RC=0 on match.
+REM Reached only via CALL (the goto :GATE_OK above jumps past it).
+"%NODE_EXE%" "%BRAIN_DIR%\agent-code-crypto.js" verify "%~1"
+if not errorlevel 1 set "VERIFY_RC=0"
+goto :eof
 
 :GATE_BAD_CODE
 echo.
@@ -207,6 +226,21 @@ schtasks /delete /tn "WinConfig Cleanup Daily" /f >nul 2>&1
 set "ALL_STARTUP=%ProgramData%\Microsoft\Windows\Start Menu\Programs\Startup"
 set "SHORTCUT=WinConfig.lnk"
 if exist "%ALL_STARTUP%\%SHORTCUT%" del "%ALL_STARTUP%\%SHORTCUT%" >nul 2>&1
+
+REM FINAL SWEEP (completeness): only NOW - after the service is uninstalled and
+REM every task is deleted, so nothing is left that could relaunch the proxy - do
+REM a last process kill. Earlier we stopped the proxy while the tasks/service were
+REM still being torn down, so a layer could (and on a real terminal did) relaunch
+REM node in the gap, leaving a live proxy AFTER "uninstall". Killing here, last,
+REM closes that window. Scoped by command line (StopWatcherProcesses.ps1) - never
+REM a blanket node kill. Then re-assert normal internet for this user.
+powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%BRAIN_DIR%\StopWatcherProcesses.ps1" >nul 2>&1
+if exist "%BRAIN_DIR%\watchdog_loop.pid" (
+    for /f "usebackq delims=" %%a in ("%BRAIN_DIR%\watchdog_loop.pid") do taskkill /PID %%a /F >nul 2>&1
+    del "%BRAIN_DIR%\watchdog_loop.pid" >nul 2>&1
+)
+reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v ProxyEnable /t REG_DWORD /d 0 /f >nul 2>&1
+reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v ProxyServer /f >nul 2>&1
 
 echo [ADMIN] Tasks and All Users shortcut removed.
 goto :DONE

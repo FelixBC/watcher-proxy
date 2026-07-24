@@ -2,9 +2,16 @@
 # TcpClient.Connect() with no timeout blocks ~21s when nothing is listening (Windows TCP retransmits).
 # Using BeginConnect + WaitOne(TimeoutMs) so we give up after 2s instead of 20+ seconds.
 param(
-    [int] $Port = 8080,
+    [int] $Port = 0,
     [int] $TimeoutMs = 2000
 )
+# Default to the obscure port chosen at install (proxy-port.txt), NOT 8080. An
+# explicit -Port still overrides. See proxy-port.js.
+if ($Port -le 0) {
+    $Port = 49732
+    $pf = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'proxy-port.txt'
+    if (Test-Path $pf) { $v = (Get-Content $pf -Raw -ErrorAction SilentlyContinue).Trim(); if ($v -match '^\d+$') { $Port = [int]$v } }
+}
 $ok = $false
 try {
     $tcp = New-Object Net.Sockets.TcpClient
