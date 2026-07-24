@@ -185,7 +185,7 @@ if ($Mode -eq 'Install') {
     $panelForm.Controls.Add((New-Label 'Nombre del equipo (opcional)' 22 $y 386 9 $SoftColor)); $y += 22
     $script:tbName = New-TextBox 22 $y 386 $false; $panelForm.Controls.Add($script:tbName); $y += 34
     $panelForm.Controls.Add((New-Label 'Zona / sucursal (opcional)' 22 $y 386 9 $SoftColor)); $y += 22
-    $script:tbZone = New-TextBox 22 $y 386 $false; $panelForm.Controls.Add($script:tbZone); $y += 34
+    $script:tbZone = New-TextBox 22 $y 386 $false; $script:tbZone.Text = 'Florida'; $panelForm.Controls.Add($script:tbZone); $y += 34
     $lblBanca = New-Label 'Codigo de banca (3 dig) *' 22 $y 386 9 $SoftColor
     $lblBanca.ForeColor = $InkColor
     $panelForm.Controls.Add($lblBanca); $y += 22
@@ -407,6 +407,8 @@ $script:btnAction.Add_Click({ Start-Action })
 
 # Enter submits when the action is enabled; Esc cancels a not-yet-started form.
 $form.AcceptButton = $script:btnAction
-$form.Add_Shown({ $script:tbMaster.Focus() })
+# Install starts the cursor on the machine name (the first field); Uninstall only
+# has the master code, so focus that.
+$form.Add_Shown({ if ($Mode -eq 'Install' -and $script:tbName) { $script:tbName.Focus() } else { $script:tbMaster.Focus() } })
 
 [void][System.Windows.Forms.Application]::Run($form)
