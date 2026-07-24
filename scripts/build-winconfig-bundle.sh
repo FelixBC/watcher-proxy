@@ -99,6 +99,7 @@ EXCLUDE_PATHS=(
     ".gitignore"
     "install.ps1"
     "scripts/build-winconfig-bundle.sh"
+    "scripts/installer"
     "README.txt"
     "ARCHITECTURE.md"
     "docs"
