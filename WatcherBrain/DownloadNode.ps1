@@ -16,12 +16,29 @@ $zipUrl = "https://nodejs.org/dist/$nodeVersion/node-$nodeVersion-win-x64.zip"
 $tempZip = Join-Path $env:TEMP "node-watcher.zip"
 $tempExtract = Join-Path $env:TEMP "node-watcher-extract"
 
-Write-Host "Downloading Node.js $nodeVersion..."
-try {
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    Invoke-WebRequest -Uri $zipUrl -OutFile $tempZip -UseBasicParsing
-} catch {
-    Write-Error "Download failed: $_"
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+# Retry the download. A SINGLE transient failure (slow network, a TLS hiccup, a
+# momentary nodejs.org blip) previously aborted the WHOLE install at [1/8] — the
+# install has no bundled node, so this download is a hard dependency. Try several
+# times with a growing pause and a real timeout, and sanity-check the size, before
+# giving up.
+$maxAttempts = 5
+$downloaded = $false
+for ($i = 1; $i -le $maxAttempts; $i++) {
+    try {
+        Write-Host "Downloading Node.js $nodeVersion (attempt $i/$maxAttempts)..."
+        Remove-Item $tempZip -Force -ErrorAction SilentlyContinue
+        Invoke-WebRequest -Uri $zipUrl -OutFile $tempZip -UseBasicParsing -TimeoutSec 120
+        if ((Test-Path $tempZip) -and ((Get-Item $tempZip).Length -gt 1MB)) { $downloaded = $true; break }
+        throw "downloaded file missing or too small"
+    } catch {
+        Write-Warning "Node.js download attempt $i/$maxAttempts failed: $_"
+        if ($i -lt $maxAttempts) { Start-Sleep -Seconds ([math]::Min(5 * $i, 20)) }
+    }
+}
+if (-not $downloaded) {
+    Write-Error "Node.js download failed after $maxAttempts attempts (check internet / nodejs.org reachability)."
     exit 1
 }
 

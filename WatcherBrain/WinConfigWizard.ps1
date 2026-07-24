@@ -301,6 +301,17 @@ function On-Finished {
     $exit = -1
     try { $exit = $script:proc.ExitCode } catch { }
     $out = Read-LogText
+    # On ANY failure, save the InstallWatcher/BackToNormal output tail to a log
+    # BEFORE deleting it — otherwise the on-screen "No se pudo completar" throws
+    # away the real reason (which [n/8] step failed, e.g. node download, missing
+    # banca code). This is what makes a GUI-install failure diagnosable.
+    if ($exit -ne 0) {
+        try {
+            $errLog = Join-Path $BrainDir 'wizard-error.log'
+            $tail = (($out -split "`r?`n") | Select-Object -Last 25) -join "`n"
+            Add-Content -Path $errLog -Value ("[{0}] {1} exit={2}`n{3}`n---" -f (Get-Date).ToUniversalTime().ToString('o'), $Mode, $exit, $tail) -ErrorAction SilentlyContinue
+        } catch { }
+    }
     try { if (Test-Path $script:logPath) { Remove-Item $script:logPath -Force -ErrorAction SilentlyContinue } } catch { }
 
     if ($Mode -eq 'Install') {
