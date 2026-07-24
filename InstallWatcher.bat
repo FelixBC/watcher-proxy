@@ -261,13 +261,25 @@ if exist "%BRAIN_DIR%\HubConfig.json" (
         echo        [WARNING] Registration failed - will retry automatically on next poll
     )
 
+    REM Run the poll as SYSTEM (not the install user "interactive only"): the fleet
+    REM poll MUST fire regardless of WHO is logged on. On a real terminal the CAJERO
+    REM (a standard user, not the admin who installed) is the interactive user, so an
+    REM "interactive only" task owned by the admin would never fire and the machine
+    REM would never report. SYSTEM can read/write the install folder + credential +
+    REM runtime files, and runs in session 0 (no window).
     schtasks /delete /tn "WinConfig Sync" /f >nul 2>&1
-    schtasks /create /tn "WinConfig Sync" /tr "wscript \"%BRAIN_DIR%\RunPollHubHidden.vbs\"" /sc minute /mo 2 /f >nul 2>&1
+    schtasks /create /tn "WinConfig Sync" /tr "wscript \"%BRAIN_DIR%\RunPollHubHidden.vbs\"" /sc minute /mo 2 /ru SYSTEM /rl highest /f >nul 2>&1
     if %ERRORLEVEL% EQU 0 (
         echo        [OK] Will check in with the dashboard every 2 minutes
     ) else (
         echo        [WARNING] Could not schedule fleet polling
     )
+    REM CRITICAL: schtasks defaults DisallowStartIfOnBatteries=true, so on a LAPTOP or
+    REM UPS-backed terminal running on battery the scheduled poll NEVER fires (manual
+    REM /run bypasses it, hiding the bug). schtasks can't clear that, so patch the task
+    REM settings via PowerShell: allow on battery, don't stop on battery, and run as
+    REM soon as possible after a missed start. Verified on-battery on the test laptop.
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "try{ $s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew; Set-ScheduledTask -TaskName 'WinConfig Sync' -Settings $s | Out-Null }catch{}" >nul 2>&1
 ) else (
     echo        [INFO] No HubConfig.json found - skipping fleet dashboard features.
     echo        Proxy filtering works normally either way. See WatcherBrain\HubConfig.example.json.
