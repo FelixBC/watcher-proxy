@@ -139,6 +139,48 @@ function isProtected(relativePath) {
     );
 }
 
+// Overwrite an EXISTING dest file in place (open r+ -> truncate -> write) instead
+// of fs.copyFileSync. On Windows, copyFileSync opens the dest with CREATE_ALWAYS,
+// which FAILS with EPERM when the dest carries the Hidden+System attributes the
+// install's disguise sets on shipped files (BackToNormal.bat, whitelist.txt,
+// VERSION, ...). That killed EVERY self-update: it copied the new tree over the
+// old, hit "EPERM: operation not permitted, copyfile ...BackToNormal.bat" on the
+// first hidden file, rolled back, and retried forever (flashing windows each try).
+// Opening the existing file r+ preserves the attributes and avoids the EPERM;
+// copyFileSync is only used to CREATE a brand-new file (nothing to preserve).
+function overwriteFile(srcPath, destPath) {
+    if (!fs.existsSync(destPath)) {
+        fs.copyFileSync(srcPath, destPath);
+        return;
+    }
+    const data = fs.readFileSync(srcPath);
+    const fd = fs.openSync(destPath, 'r+');
+    try {
+        fs.ftruncateSync(fd, 0);
+        fs.writeSync(fd, data, 0, data.length, 0);
+    } finally {
+        fs.closeSync(fd);
+    }
+}
+
+// Same Hidden+System-safe write for a short string (VERSION). fs.writeFileSync
+// would EPERM on the disguised (Hidden+System) VERSION file, so the version marker
+// never advanced after a copy — write it in place instead.
+function writeFileInPlace(destPath, content) {
+    if (!fs.existsSync(destPath)) {
+        fs.writeFileSync(destPath, content, 'utf-8');
+        return;
+    }
+    const buf = Buffer.from(content, 'utf-8');
+    const fd = fs.openSync(destPath, 'r+');
+    try {
+        fs.ftruncateSync(fd, 0);
+        fs.writeSync(fd, buf, 0, buf.length, 0);
+    } finally {
+        fs.closeSync(fd);
+    }
+}
+
 function copyTree(srcDir, destDir, relativeBase) {
     for (const entry of fs.readdirSync(srcDir, { withFileTypes: true })) {
         const rel = relativeBase ? `${relativeBase}/${entry.name}` : entry.name;
@@ -152,7 +194,7 @@ function copyTree(srcDir, destDir, relativeBase) {
             copyTree(srcPath, destPath, rel);
         } else {
             fs.mkdirSync(path.dirname(destPath), { recursive: true });
-            fs.copyFileSync(srcPath, destPath);
+            overwriteFile(srcPath, destPath);
         }
     }
 }
@@ -341,7 +383,7 @@ async function main() {
 
         // The hub bundle has files at the extract root (no wrapper folder).
         copyTree(tempExtract, ROOT_DIR, '');
-        fs.writeFileSync(VERSION_PATH, argVersion, 'utf-8'); // hub is authoritative
+        writeFileInPlace(VERSION_PATH, argVersion); // hub is authoritative
         log('New files copied in.');
 
         startProxyAndWatchdog();
@@ -351,7 +393,7 @@ async function main() {
             log('Post-update health check FAILED — rolling back.');
             stopProxyAndWatchdog();
             restoreBackup(backupDir);
-            fs.writeFileSync(VERSION_PATH, localVersion, 'utf-8');
+            writeFileInPlace(VERSION_PATH, localVersion);
             startProxyAndWatchdog();
             const rolledBackHealthy = await waitForHealthy(5, 3000);
             log(
@@ -374,7 +416,7 @@ async function main() {
         try {
             stopProxyAndWatchdog();
             restoreBackup(backupDir);
-            fs.writeFileSync(VERSION_PATH, localVersion, 'utf-8');
+            writeFileInPlace(VERSION_PATH, localVersion);
             startProxyAndWatchdog();
         } catch (rollbackErr) {
             log(`Rollback itself failed: ${rollbackErr.message}. Watchdog remains responsible for fail-open safety.`);
