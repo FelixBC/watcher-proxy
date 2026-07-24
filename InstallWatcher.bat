@@ -279,7 +279,13 @@ if exist "%BRAIN_DIR%\HubConfig.json" (
     REM /run bypasses it, hiding the bug). schtasks can't clear that, so patch the task
     REM settings via PowerShell: allow on battery, don't stop on battery, and run as
     REM soon as possible after a missed start. Verified on-battery on the test laptop.
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "try{ $s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew; Set-ScheduledTask -TaskName 'WinConfig Sync' -Settings $s | Out-Null }catch{}" >nul 2>&1
+    REM Also cap the execution time at 5 min (schtasks defaults 72h): a poll normally
+    REM finishes in seconds (poll-hub has its own 15s/6s request timeouts), so if one
+    REM ever hung, the 72h default + IgnoreNew would block reporting for up to 3 days;
+    REM PT5M lets the next scheduled poll recover in minutes. Idle/network conditions
+    REM stay OFF (New-ScheduledTaskSettingsSet defaults) so an active cajero or a brief
+    REM WiFi blip never stops the poll from firing.
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "try{ $s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 5); Set-ScheduledTask -TaskName 'WinConfig Sync' -Settings $s | Out-Null }catch{}" >nul 2>&1
 ) else (
     echo        [INFO] No HubConfig.json found - skipping fleet dashboard features.
     echo        Proxy filtering works normally either way. See WatcherBrain\HubConfig.example.json.

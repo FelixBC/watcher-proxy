@@ -95,6 +95,18 @@ cdn.tiny.cloud
 cloud.tinymce.com
 sp.tinymce.com
 
+# konfyanslotto: su plataforma de resultados (players./sys.) + los CDNs de
+# librerias e iconos que el POS carga. Sin estos: los iconos no cargan y la
+# ventana de imprimir no abre. Detectados bloqueados en un intento de impresion
+# real (2026-07-24).
+elite21.io
+use.fontawesome.com
+stackpath.bootstrapcdn.com
+cdnjs.cloudflare.com
+cdn.jsdelivr.net
+unpkg.com
+cdn.quilljs.com
+
 # UltraViewer (remote desktop - allow all so it does not crash when proxy is on)
 ultraviewer.net
 www.ultraviewer.net
@@ -153,6 +165,16 @@ microsoftpersonalcontent.com
 1drv.com
 msauth.net
 msauthimages.net
+# Ruido de Office/MSN/Skype/Edge que salia bloqueado (telemetria/infra benigna,
+# NO navegacion) — agregado para que la lista de bloqueados sea una senal de
+# auditoria limpia (Felix, 2026-07-24).
+microsoft365.com
+microsoft.microsoftofficehub
+sfx.ms
+live.net
+skype.com
+edge-consumer-static.azureedge.net
+img-s-msn-com.akamaized.net
 
 # Certificados / PKI (para que la validacion TLS de HTTPS funcione en todos lados)
 pki.goog
