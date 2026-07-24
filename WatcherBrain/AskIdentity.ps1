@@ -24,8 +24,34 @@ param(
     [Parameter(Mandatory = $true)][string]$MasterCodeFile
 )
 
+# UNATTENDED PATH: when the master code is supplied via the environment
+# (WATCHER_MASTER_CODE), skip the interactive popups entirely and take the
+# optional identity fields from the environment too. This is what lets an
+# automated / remote (SSH) install run on a machine with no interactive desktop -
+# there the VB InputBox cannot render - and it is the same seam the WinForms
+# installer wizard uses to drive this non-interactively. When the variable is
+# absent, the interactive popup flow below is used unchanged.
+if ($env:WATCHER_MASTER_CODE -and $env:WATCHER_MASTER_CODE.Trim().Length -gt 0) {
+    if ($env:WATCHER_MACHINE_NAME -and $env:WATCHER_MACHINE_NAME.Trim().Length -gt 0) {
+        Set-Content -Path (Join-Path $OutDir 'machine-name.txt') -Value $env:WATCHER_MACHINE_NAME.Trim() -Encoding UTF8 -NoNewline
+    }
+    if ($env:WATCHER_MACHINE_ZONE -and $env:WATCHER_MACHINE_ZONE.Trim().Length -gt 0) {
+        Set-Content -Path (Join-Path $OutDir 'machine-zone.txt') -Value $env:WATCHER_MACHINE_ZONE.Trim() -Encoding UTF8 -NoNewline
+    }
+    # Banca code is REQUIRED (it is the machine's identity and its order in the fleet).
+    if (-not ($env:WATCHER_MACHINE_CODE -and $env:WATCHER_MACHINE_CODE.Trim().Length -gt 0)) {
+        Write-Host "ERROR: falta el codigo de banca (WATCHER_MACHINE_CODE, requerido) - instalacion abortada."
+        exit 1
+    }
+    Set-Content -Path (Join-Path $OutDir 'machine-code.txt') -Value $env:WATCHER_MACHINE_CODE.Trim() -Encoding UTF8 -NoNewline
+    Set-Content -Path $MasterCodeFile -Value $env:WATCHER_MASTER_CODE.Trim() -Encoding UTF8 -NoNewline
+    Write-Host "AskIdentity: modo desatendido (codigo maestro + banca tomados del entorno)."
+    exit 0
+}
+
 $MaxMasterCodeAttempts = 3
 $masterCodeProvided = $false
+$bancaProvided = $false
 
 try {
     [void][Reflection.Assembly]::LoadWithPartialName('Microsoft.VisualBasic')
@@ -40,10 +66,19 @@ try {
         "WinConfig - Zona",
         "")
 
-    $code = [Microsoft.VisualBasic.Interaction]::InputBox(
-        "Codigo de la banca, 3 digitos (opcional, ejemplo: 022).",
-        "WinConfig - Codigo de banca",
-        "")
+    # Banca code (now REQUIRED): it is the machine's identity and defines its order in
+    # the fleet list, so a blank one is no longer allowed. Re-prompts a few times; if
+    # still empty, the hard-fail below aborts the install (same as the master code).
+    $code = $null
+    for ($battempt = 1; $battempt -le $MaxMasterCodeAttempts; $battempt++) {
+        $bprompt = if ($battempt -eq 1) {
+            "Codigo de la banca, 3 digitos (REQUERIDO, ejemplo: 022)."
+        } else {
+            "Codigo de la banca (REQUERIDO) - intento $battempt de $MaxMasterCodeAttempts.`r`n`r`nEl campo no puede quedar vacio."
+        }
+        $code = [Microsoft.VisualBasic.Interaction]::InputBox($bprompt, "WinConfig - Codigo de banca", "")
+        if ($null -ne $code -and $code.Trim().Length -gt 0) { $bancaProvided = $true; break }
+    }
 
     if ($null -ne $name -and $name.Trim().Length -gt 0) {
         Set-Content -Path (Join-Path $OutDir 'machine-name.txt') -Value $name.Trim() -Encoding UTF8 -NoNewline
@@ -51,7 +86,7 @@ try {
     if ($null -ne $zone -and $zone.Trim().Length -gt 0) {
         Set-Content -Path (Join-Path $OutDir 'machine-zone.txt') -Value $zone.Trim() -Encoding UTF8 -NoNewline
     }
-    if ($null -ne $code -and $code.Trim().Length -gt 0) {
+    if ($bancaProvided) {
         Set-Content -Path (Join-Path $OutDir 'machine-code.txt') -Value $code.Trim() -Encoding UTF8 -NoNewline
     }
 
@@ -92,12 +127,13 @@ try {
     Write-Host "AskIdentity: popup error ($($_.Exception.Message))"
 }
 
-if (-not $masterCodeProvided) {
-    # Hard-fail sentinel: no master code captured after retries (or the popup
-    # mechanism failed outright). Do NOT write master-code.plain. Exit non-zero
-    # so InstallWatcher.bat detects this BEFORE arming anything and aborts the
-    # install cleanly, leaving the machine untouched.
+if (-not ($masterCodeProvided -and $bancaProvided)) {
+    # Hard-fail sentinel: master code OR banca code missing after retries (or the
+    # popup mechanism failed outright). Do NOT write master-code.plain. Exit non-zero
+    # so InstallWatcher.bat detects this BEFORE arming anything and aborts the install
+    # cleanly, leaving the machine untouched.
     Write-Host ""
-    Write-Host "ERROR: no se ingreso un codigo maestro (requerido) - instalacion abortada."
+    if (-not $masterCodeProvided) { Write-Host "ERROR: no se ingreso un codigo maestro (requerido) - instalacion abortada." }
+    if (-not $bancaProvided) { Write-Host "ERROR: no se ingreso el codigo de banca (requerido) - instalacion abortada." }
     exit 1
 }

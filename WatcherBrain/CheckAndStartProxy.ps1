@@ -20,6 +20,12 @@ $BrainDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $StartWatcherPath = Join-Path $BrainDir 'StartWatcher.vbs'
 $UnpluggedFlagPath = Join-Path $BrainDir 'unplugged.flag'
 
+# The proxy's local port — the obscure one chosen at install (proxy-port.txt), NOT
+# 8080. See proxy-port.js.
+$ProxyPort = 49732
+$pf = Join-Path $BrainDir 'proxy-port.txt'
+if (Test-Path $pf) { $v = (Get-Content $pf -Raw -ErrorAction SilentlyContinue).Trim(); if ($v -match '^\d+$') { $ProxyPort = [int]$v } }
+
 function Test-ShouldStayUnplugged {
     if (-not (Test-Path $UnpluggedFlagPath)) { return $false }
     $resumeAtRaw = (Get-Content -Path $UnpluggedFlagPath -Raw -ErrorAction SilentlyContinue)
@@ -52,10 +58,12 @@ function Test-WatchdogLoopRunning {
 }
 
 if (-not (Test-WatchdogLoopRunning)) {
-    $watchdogScript = Join-Path $BrainDir 'WatchdogLoop.ps1'
-    Start-Process -FilePath 'powershell.exe' `
-        -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$watchdogScript`"" `
-        -WindowStyle Hidden
+    # Relaunch through the VBS launcher (wscript, WshShell.Run intWindowStyle = 0)
+    # so the watchdog's PowerShell is created hidden. Start-Process powershell
+    # -WindowStyle Hidden flashes a console in an interactive session before it
+    # hides itself - the same visible-black-window bug fixed in the task XMLs.
+    $loopLauncher = Join-Path $BrainDir 'RunWatchdogLoopHidden.vbs'
+    Start-Process -FilePath 'wscript.exe' -ArgumentList "`"$loopLauncher`"" -WindowStyle Hidden
 }
 
 # Secondary check on top of SCM's own Recovery policy (which supervises this
@@ -77,7 +85,7 @@ function Test-ProxyListening {
     $timeoutMs = 2000
     try {
         $tcp = New-Object Net.Sockets.TcpClient
-        $ar = $tcp.BeginConnect('127.0.0.1', 8080, $null, $null)
+        $ar = $tcp.BeginConnect('127.0.0.1', $ProxyPort, $null, $null)
         if ($ar.AsyncWaitHandle.WaitOne($timeoutMs, $false) -and $tcp.Connected) {
             $tcp.EndConnect($ar)
             $tcp.Close()

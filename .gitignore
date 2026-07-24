@@ -21,5 +21,7 @@ uninstall-code.hash
 WatcherBrain/unplugged.flag
 WatcherBrain/whitelist-version.txt
 WatcherBrain/poll-log-cursor.txt
+# Per-machine chosen proxy port (written at install by proxy-port.js select).
+WatcherBrain/proxy-port.txt
 WatcherBrain/update.log
 WatcherBrain/_backup_*/

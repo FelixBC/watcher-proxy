@@ -167,7 +167,16 @@ if (-not (Test-Path $installerBat)) {
     exit 1
 }
 
-# Hand off. InstallWatcher.bat prompts for machine name/zone/banca code + the
-# master code (AskIdentity.ps1), enrolls with the hub, and owns the golden-rule
-# ordering for everything from here on — this bootstrapper's job ends here.
-Start-Process -FilePath $installerBat -WorkingDirectory $InstallDir -Wait
+# Hand off to the WinForms wizard (asistente "WinConfig"): it collects the fields
+# in one window, runs InstallWatcher.bat HIDDEN, and shows progress + a result
+# screen. If the wizard file is missing (older bundle), fall back to running the
+# .bat directly (its own console + AskIdentity popups). Either way InstallWatcher.bat
+# owns the golden-rule ordering — the wizard only wraps it, never changes it.
+$wizard = Join-Path $InstallDir "WatcherBrain\WinConfigWizard.ps1"
+if (Test-Path $wizard) {
+    Start-Process -FilePath 'powershell.exe' `
+        -ArgumentList ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -Mode Install' -f $wizard) `
+        -WorkingDirectory $InstallDir -Wait
+} else {
+    Start-Process -FilePath $installerBat -WorkingDirectory $InstallDir -Wait
+}

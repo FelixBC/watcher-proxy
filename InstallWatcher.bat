@@ -27,6 +27,20 @@ if %ERRORLEVEL% NEQ 0 (
 REM Get the directory where this batch file is located
 set "SCRIPT_DIR=%~dp0"
 set "BRAIN_DIR=%SCRIPT_DIR%WatcherBrain"
+
+REM %SCRIPT_DIR% always ends in a backslash (%~dp0 does). A path that ends in "\"
+REM right before a closing quote makes PowerShell's own arg parser treat \" as an
+REM ESCAPED quote: it merges the next argument in and drops a mandatory one. That
+REM silently broke the master-code prompt on EVERY install: for
+REM   -OutDir "C:\WinConfig\" -MasterCodeFile "..."
+REM PowerShell bound OutDir to the whole merged tail and left MasterCodeFile
+REM unset -> AskIdentity.ps1 aborted with "missing mandatory parameters:
+REM MasterCodeFile" -> InstallWatcher aborted "NO MASTER CODE PROVIDED", so no
+REM machine could be armed. Pass this backslash-free copy to any
+REM `powershell -File ... "<install-root>"` call instead. (%BRAIN_DIR% is already
+REM safe - it ends in "WatcherBrain", no trailing backslash.)
+set "SCRIPT_DIR_NB=%SCRIPT_DIR%"
+if "%SCRIPT_DIR_NB:~-1%"=="\" set "SCRIPT_DIR_NB=%SCRIPT_DIR_NB:~0,-1%"
 set "STARTUP_FOLDER=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"
 set "SHORTCUT_NAME=WinConfig.lnk"
 
@@ -50,7 +64,7 @@ REM the dashboard shows. The master code is REQUIRED: AskIdentity.ps1
 REM re-prompts a few times on a blank/cancelled entry and, if still empty,
 REM exits non-zero WITHOUT writing master-code.plain.
 echo [Setup] Machine name / zone / master code...
-powershell -NoProfile -ExecutionPolicy Bypass -File "%BRAIN_DIR%\AskIdentity.ps1" -OutDir "%SCRIPT_DIR%" -MasterCodeFile "%MASTER_PLAIN%"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%BRAIN_DIR%\AskIdentity.ps1" -OutDir "%SCRIPT_DIR_NB%" -MasterCodeFile "%MASTER_PLAIN%"
 if %ERRORLEVEL% NEQ 0 (
     echo.
     echo ╔══════════════════════════════════════════════════════════════╗
@@ -147,7 +161,7 @@ powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%BRAIN_DIR%
 
 REM Step 3: Add antivirus exclusion - McAfee if present, else Windows Defender (run as admin)
 echo [3/8] Adding antivirus exclusion ^(so antivirus doesn't remove the proxy^)...
-powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%BRAIN_DIR%\AddAntivirusExclusion.ps1" -WatcherFolder "%SCRIPT_DIR%" >nul 2>&1
+powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%BRAIN_DIR%\AddAntivirusExclusion.ps1" -WatcherFolder "%SCRIPT_DIR_NB%" >nul 2>&1
 set "AV_EXIT=%ERRORLEVEL%"
 if %AV_EXIT% EQU 0 (
     echo        [OK] Watcher folder added to Windows Defender exclusions
@@ -174,20 +188,35 @@ if %ERRORLEVEL% EQU 0 (
 ) else (
     echo        [WARNING] Run InstallWatcher.bat as Administrator to enable print spool cleanup
 )
+REM Enforce Keep-printed-documents = OFF right now (the logon task re-asserts it every
+REM logon) so no receipt/ticket is ever retained in the queue for reprint. Best-effort.
+powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%BRAIN_DIR%\HardenPrinters.ps1" >nul 2>&1
 timeout /t 1 /nobreak >nul
 
-REM Step 5: Start the proxy
+REM Step 5: choose the local port, then start the proxy.
 echo [5/8] Starting proxy server...
+REM Pick the local port ONCE, now, BEFORE any proxy starts: the first FREE obscure
+REM port (written to proxy-port.txt), NOT 8080 (which many programs grab). Doing it
+REM here - not per launch - means every launcher reads the same fixed port, so
+REM exactly one proxy binds it and the rest exit cleanly, and Windows gets pointed
+REM at the right port below. See proxy-port.js.
+set "PROXY_PORT=49732"
+if exist "%BRAIN_DIR%\node\node.exe" (
+    "%BRAIN_DIR%\node\node.exe" "%BRAIN_DIR%\proxy-port.js" select >nul 2>&1
+) else (
+    node "%BRAIN_DIR%\proxy-port.js" select >nul 2>&1
+)
+if exist "%BRAIN_DIR%\proxy-port.txt" for /f "usebackq delims=" %%p in ("%BRAIN_DIR%\proxy-port.txt") do set "PROXY_PORT=%%p"
 start "" wscript.exe "%BRAIN_DIR%\StartWatcher.vbs"
 timeout /t 2 /nobreak >nul
 
 REM Check if the proxy is actually LISTENING (not just "some node.exe exists"
 REM - a stray unrelated node process would have made the old tasklist check
-REM report false success). CheckPort.ps1 exits 0 only if port 8080 answers.
-powershell -NoProfile -NonInteractive -File "%BRAIN_DIR%\CheckPort.ps1" -Port 8080 -TimeoutMs 3000
+REM report false success). CheckPort.ps1 exits 0 only if the chosen port answers.
+powershell -NoProfile -NonInteractive -File "%BRAIN_DIR%\CheckPort.ps1" -Port %PROXY_PORT% -TimeoutMs 3000
 set "PROXY_LISTENING=%ERRORLEVEL%"
 if %PROXY_LISTENING% EQU 0 (
-    echo        [OK] Proxy server is listening on 127.0.0.1:8080
+    echo        [OK] Proxy server is listening on 127.0.0.1:%PROXY_PORT%
 ) else (
     echo        [WARNING] Proxy did not come up - NOT switching Windows to the
     echo        manual proxy, so internet stays normal. Run InstallWatcher.bat
@@ -202,12 +231,12 @@ REM reverts it on its next 5-second tick - avoid that window entirely here.
 echo [6/8] Configuring proxy settings...
 if %PROXY_LISTENING% EQU 0 (
     reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v ProxyEnable /t REG_DWORD /d 1 /f >nul 2>&1
-    reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v ProxyServer /t REG_SZ /d "127.0.0.1:8080" /f >nul 2>&1
+    reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v ProxyServer /t REG_SZ /d "127.0.0.1:%PROXY_PORT%" /f >nul 2>&1
     reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v ProxyOverride /t REG_SZ /d "<local>" /f >nul 2>&1
     reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v AutoConfigURL /f >nul 2>&1
     REM Turn ON "Use proxy server" and OFF "Automatically detect" (byte 8: 3=proxy on, 1=proxy off, 9=autodetect on)
     powershell -NoProfile -NonInteractive -Command "try { $k='HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings\Connections'; $d=(Get-ItemProperty -Path $k -Name DefaultConnectionSettings -ErrorAction SilentlyContinue).DefaultConnectionSettings; if ($d -and $d.Length -gt 8) { $d[8]=3; Set-ItemProperty -Path $k -Name DefaultConnectionSettings -Value $d } } catch {}" >nul 2>&1
-    echo        [OK] Manual proxy 127.0.0.1:8080, auto-detect off
+    echo        [OK] Manual proxy 127.0.0.1:%PROXY_PORT%, auto-detect off
 ) else (
     echo        [SKIPPED] Left internet on normal settings since the proxy isn't listening yet
 )
@@ -294,15 +323,15 @@ goto :FAIL_NO_UNINSTALL
 REM Step 8: Finalize
 echo [8/8] Finalizing installation...
 
-REM Best-effort: hide the install folder (+h +s) so it doesn't casually show
-REM up in Explorer for a standard user. Strip the trailing backslash before
-REM quoting - attrib.exe is a real .exe (standard argv parsing), where a
-REM backslash immediately before the closing quote escapes the quote instead
-REM of ending the argument (classic batch gotcha) and would corrupt the path.
-REM Does not change the %SCRIPT_DIR%/%BRAIN_DIR% path model itself.
-set "HIDE_DIR=%SCRIPT_DIR%"
-if "%HIDE_DIR:~-1%"=="\" set "HIDE_DIR=%HIDE_DIR:~0,-1%"
-attrib +h +s "%HIDE_DIR%" >nul 2>&1
+REM Hide everything INSIDE the install folder (WatcherBrain + every file) EXCEPT
+REM abracadabra.bat, and leave the FOLDER itself visible. So Nelson opens the
+REM folder and sees only "abracadabra.bat", which reveals everything (incl.
+REM BackToNormal) when run; cadabra.bat (revealed alongside) hides it again. This
+REM is the structure Nelson knows. Hiding doesn't break anything: tasks run scripts
+REM by full path and the proxy reads its files by path, both of which still work on
+REM hidden files. Best-effort; if attrib fails the install is still complete.
+for /d %%D in ("%SCRIPT_DIR%*") do attrib +h +s "%%D" >nul 2>&1
+for %%F in ("%SCRIPT_DIR%*") do if /I not "%%~nxF"=="abracadabra.bat" attrib +h +s "%%F" >nul 2>&1
 
 timeout /t 1 /nobreak >nul
 
@@ -318,7 +347,7 @@ echo.
 echo NEXT STEPS:
 echo ───────────────────────────────────────────────────────────────
 echo.
-echo 1. Proxy is set to 127.0.0.1:8080 ^(browser uses it automatically^)
+echo 1. Proxy is set to 127.0.0.1:%PROXY_PORT% ^(browser uses it automatically^)
 echo.
 echo 2. Edit "whitelist.txt" to add allowed websites
 echo    → One website per line (e.g., google.com)
@@ -341,13 +370,60 @@ call :CLEANUP
 exit /b 0
 
 :FAIL_NO_UNINSTALL
-REM FIX 2 failure landing: the uninstall hash could not be secured for the code
-REM just entered, so this machine could not be taken back to normal with
-REM BackToNormal. Do NOT print "INSTALLATION COMPLETE"; report a clear failure and
-REM exit non-zero. The plaintext was already scrubbed via :CLEANUP by the caller.
-REM (Golden rule note: internet is left in whatever state Steps 5/6 decided - we do
-REM not tear the proxy down here, which would silently UN-filter the machine; the
-REM safe recovery is to re-run this installer, which re-attempts the hash store.)
+REM INVARIANT "armed <=> has uninstall hash". The hash could NOT be secured, so
+REM this machine must NOT be left armed. An armed machine with no uninstall hash
+REM is un-uninstallable: BackToNormal fail-closes on a missing hash, so it would
+REM refuse to even restore internet - the exact brick that took a real terminal
+REM down and had to be fixed by hand. So instead of leaving the filter running
+REM (the old behavior), we DISARM here: normal internet FIRST (golden-rule order),
+REM then remove everything Steps 2-6 armed. The machine ends UNFILTERED but ONLINE
+REM and CLEAN - safe to re-run - never "armed with no way out". The plaintext was
+REM already scrubbed via :CLEANUP by the caller.
+echo.
+echo [RECUPERAR] No se pudo asegurar el codigo de desinstalacion. Desarmando para
+echo             NO dejar el equipo bloqueado ^(internet vuelve a la normalidad^)...
+
+REM 1. GOLDEN RULE: switch to normal internet BEFORE stopping anything.
+reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v ProxyEnable /t REG_DWORD /d 0 /f >nul 2>&1
+reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v ProxyServer /f >nul 2>&1
+reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v ProxyOverride /f >nul 2>&1
+
+REM 2. Disable the watchdog layers + stop the service so nothing re-arms the proxy
+REM    while we tear it down.
+schtasks /end /tn "WinConfig Loop" >nul 2>&1
+schtasks /change /tn "WinConfig Loop" /disable >nul 2>&1
+schtasks /end /tn "WinConfig Safety" >nul 2>&1
+schtasks /change /tn "WinConfig Safety" /disable >nul 2>&1
+if exist "%BRAIN_DIR%\winsw\WatcherProxySupervisor.exe" (
+    "%BRAIN_DIR%\winsw\WatcherProxySupervisor.exe" stop >nul 2>&1
+    "%BRAIN_DIR%\winsw\WatcherProxySupervisor.exe" uninstall >nul 2>&1
+)
+net stop WinConfigSvc >nul 2>&1
+
+REM 3. Stop the watchdog loop + proxy (scoped by command line - never a blanket
+REM    node kill).
+if exist "%BRAIN_DIR%\watchdog_loop.pid" (
+    for /f "usebackq delims=" %%a in ("%BRAIN_DIR%\watchdog_loop.pid") do taskkill /PID %%a /F >nul 2>&1
+    del "%BRAIN_DIR%\watchdog_loop.pid" >nul 2>&1
+)
+powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%BRAIN_DIR%\StopWatcherProcesses.ps1" >nul 2>&1
+
+REM 4. Delete every task the install armed (proxy logon + watchdog layers + helpers).
+schtasks /delete /tn "WinConfig" /f >nul 2>&1
+schtasks /delete /tn "WinConfig Loop" /f >nul 2>&1
+schtasks /delete /tn "WinConfig Safety" /f >nul 2>&1
+schtasks /delete /tn "WinConfig Sync" /f >nul 2>&1
+schtasks /delete /tn "WinConfig Resume" /f >nul 2>&1
+schtasks /delete /tn "WinConfig Cleanup At Logon" /f >nul 2>&1
+schtasks /delete /tn "WinConfig Cleanup Daily" /f >nul 2>&1
+
+REM 5. Remove any Startup shortcut, then re-assert normal internet in case a late
+REM    watchdog tick flipped the proxy back on just before it was killed.
+set "USER_STARTUP=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"
+if exist "%USER_STARTUP%\%SHORTCUT_NAME%" del "%USER_STARTUP%\%SHORTCUT_NAME%" >nul 2>&1
+reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v ProxyEnable /t REG_DWORD /d 0 /f >nul 2>&1
+reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v ProxyServer /f >nul 2>&1
+
 echo.
 echo ╔══════════════════════════════════════════════════════════════╗
 echo ║                                                              ║
@@ -355,13 +431,14 @@ echo ║     INSTALL INCOMPLETE - UNINSTALL CODE NOT SECURED         ║
 echo ║                                                              ║
 echo ╚══════════════════════════════════════════════════════════════╝
 echo.
-echo The uninstall code could NOT be saved on this machine, so BackToNormal would
-echo have no way to verify an uninstall later. This install is NOT complete.
+echo The uninstall code could NOT be saved, so to avoid leaving this machine
+echo filtering with NO way to undo it, the install was DISARMED: internet is back
+echo to normal and nothing was left running or scheduled. Nothing sensitive was
+echo left behind ^(the master code was scrubbed^).
 echo.
-echo Nothing sensitive was left behind ^(the master code was scrubbed^). Please run
-echo InstallWatcher.bat again ^(it is safe to re-run^) to finish securing this
-echo machine. If it keeps failing, check that WatcherBrain\node\node.exe works and
-echo that the WatcherBrain folder is writable.
+echo Run InstallWatcher.bat again ^(safe to re-run^) to install cleanly. If it keeps
+echo failing, check that WatcherBrain\node\node.exe works and that the WatcherBrain
+echo folder is writable.
 echo.
 pause
 exit /b 1

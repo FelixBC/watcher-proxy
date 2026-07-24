@@ -129,3 +129,53 @@ supabase.co
 
 # LottoCompany transform URLS so we need to add the main URL api.lotocompany for the dependent ones to work.
 # api.lotocompany.com/api/v1/sessions/params?domain=nationlk.com
+
+# ============================================================================
+# BASE DEL SISTEMA — para que el SO y las herramientas comunes sigan funcionando
+# detras del filtro (Windows, Office, OneDrive, MSN, Edge). Son dominios de
+# INFRAESTRUCTURA, no navegacion abierta: un cajero no puede navegar sitios
+# sueltos con estos. (live.com y office.com ya estan arriba, en Correo.)
+# ============================================================================
+microsoft.com
+microsoftonline.com
+windows.com
+windowsupdate.com
+windows.net
+msftconnecttest.com
+msftncsi.com
+msn.com
+bing.com
+office.net
+office365.com
+onedrive.com
+sharepoint.com
+microsoftpersonalcontent.com
+1drv.com
+msauth.net
+msauthimages.net
+
+# Certificados / PKI (para que la validacion TLS de HTTPS funcione en todos lados)
+pki.goog
+digicert.com
+sectigo.com
+usertrust.com
+globalsign.com
+entrust.net
+letsencrypt.org
+
+# Infra de actualizacion de Chrome / Edge (descarga de componentes + pings)
+gvt1.com
+gvt2.com
+gvt3.com
+
+# WhatsApp Web (pagina + assets + websocket + media)
+whatsapp.com
+whatsapp.net
+fbcdn.net
+
+# Analytics / ads: NO se agregan a proposito — NO hacen falta para que el equipo
+# ni las apps funcionen (son solo rastreo/publicidad; las paginas cargan sin
+# ellos). Descomenta solo si de verdad los quieres permitir:
+# googletagmanager.com
+# googleadservices.com
+# google-analytics.com

@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const url = require('url');
 const { appendEvent, pruneByTime } = require('./event-log');
+const { readChosenPort, writeChosenPort } = require('./proxy-port');
 
 // Crash breadcrumbs: if the proxy dies from an unhandled error, record WHY
 // before exiting so the watchdog's restart isn't a mystery later. Exit so the
@@ -20,7 +21,8 @@ process.on('unhandledRejection', (e) => {
 
 // Configuration
 const CONFIG = {
-    PORT: process.env.PROXY_PORT || 8080,
+    // Obscure port chosen at install (proxy-port.txt), NOT 8080 — see proxy-port.js.
+    PORT: readChosenPort(),
     // Whitelist is in parent directory (one level up from WatcherBrain)
     WHITELIST_FILE: path.join(__dirname, '..', 'whitelist.txt'),
     LOG_FILE: path.join(__dirname, 'blocked-requests.log'),
@@ -442,15 +444,29 @@ if (fs.existsSync(CONFIG.WHITELIST_FILE)) {
     });
 }
 
-// Server-level errors (e.g. port already in use) are a Watcher-side failure —
-// record the reason so it's not just "proxy down" with no cause.
+// The listen port IS our single-instance lock. On real hardware several logon
+// layers (the logon task, the 5s watchdog, the 1-min safety net, the service)
+// all race to start the proxy at once — before this, the losers hit EADDRINUSE
+// but stayed alive-but-not-listening (the setInterval/watchFile timers keep the
+// process up), leaking a dead node on every logon and, multiplied, driving the
+// EADDRINUSE crash loop that took a real terminal's internet down. Now the loser
+// exits CLEANLY (0): the one that bound 8080 keeps serving, so exactly one proxy
+// runs no matter how many launchers fire, on any machine. Any OTHER server error
+// is a genuine failure — record it and exit non-zero so the watchdog restarts us.
 server.on('error', (err) => {
+    if (err && err.code === 'EADDRINUSE') {
+        try { appendEvent('proxy-dup-exit', `${CONFIG.PORT} ya en uso por otra instancia; saliendo limpio (0)`); } catch (_) {}
+        process.exit(0);
+    }
     try { appendEvent('proxy-error', err && err.message ? err.message : String(err)); } catch (_) {}
+    process.exit(1);
 });
 
 // Start server
 loadWhitelist();
 server.listen(CONFIG.PORT, () => {
+    // Record the port we actually bound so every checker/setter agrees on it.
+    try { writeChosenPort(CONFIG.PORT); } catch (_) {}
     try { appendEvent('proxy-up', `escuchando 127.0.0.1:${CONFIG.PORT}`); } catch (_) {}
     console.log(`\n========================================`);
     console.log(`  Proxy Server Started Successfully`);

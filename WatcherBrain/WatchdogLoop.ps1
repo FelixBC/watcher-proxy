@@ -18,6 +18,24 @@ $UnpluggedFlagPath = Join-Path $BrainDir 'unplugged.flag'
 $UpdatingFlagPath = Join-Path $BrainDir 'updating.flag'
 $EventsPath = Join-Path $BrainDir 'events.log'
 
+# The proxy's local port — the obscure one chosen at install (proxy-port.txt), NOT
+# 8080. See proxy-port.js.
+$ProxyPort = 49732
+$pf = Join-Path $BrainDir 'proxy-port.txt'
+if (Test-Path $pf) { $v = (Get-Content $pf -Raw -ErrorAction SilentlyContinue).Trim(); if ($v -match '^\d+$') { $ProxyPort = [int]$v } }
+
+# Single-instance guard. The "WinConfig Loop" task action is now fire-and-forget
+# (wscript, so no console flash), and the supervisor service + the 1-min safety
+# net can both ask Task Scheduler to (re)launch this loop. That means the task's
+# own MultipleInstancesPolicy no longer prevents a duplicate WatchdogLoop - so we
+# enforce it here: if another WatchdogLoop.ps1 is already running, this copy exits
+# before doing anything (it never overwrites the real one's PID file below).
+try {
+    $others = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction Stop |
+        Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -and $_.CommandLine -like '*WatchdogLoop.ps1*' }
+    if ($others) { exit 0 }
+} catch { }
+
 # Write PID so BackToNormal can stop this loop
 $PID | Out-File -FilePath $PidFile -Force -ErrorAction SilentlyContinue
 
@@ -44,7 +62,7 @@ function Test-ProxyListening {
     $timeoutMs = 2000
     try {
         $tcp = New-Object Net.Sockets.TcpClient
-        $ar = $tcp.BeginConnect('127.0.0.1', 8080, $null, $null)
+        $ar = $tcp.BeginConnect('127.0.0.1', $ProxyPort, $null, $null)
         if ($ar.AsyncWaitHandle.WaitOne($timeoutMs, $false) -and $tcp.Connected) {
             $tcp.EndConnect($ar)
             $tcp.Close()

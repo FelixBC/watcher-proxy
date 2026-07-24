@@ -17,6 +17,7 @@ const { execFileSync } = require('child_process');
 
 const { BRAIN_DIR, downloadFile } = require('./hub-client');
 const { appendEvent } = require('./event-log');
+const { readChosenPort } = require('./proxy-port');
 
 const ROOT_DIR = path.join(BRAIN_DIR, '..');
 const VERSION_PATH = path.join(ROOT_DIR, 'VERSION');
@@ -90,6 +91,7 @@ const PROTECTED_RELATIVE_PATHS = [
     'WatcherBrain/unplugged.flag',
     'WatcherBrain/updating.flag',
     'WatcherBrain/whitelist-version.txt',
+    'WatcherBrain/proxy-port.txt',
     'WatcherBrain/poll-log-cursor.txt',
     'WatcherBrain/blocked-requests.log',
     'WatcherBrain/blocked-log-cleared-at.txt',
@@ -221,7 +223,7 @@ function checkTcpOpenSync(host, port, timeoutMs) {
 
 async function waitForHealthy(retries, delayMs) {
     for (let i = 0; i < retries; i++) {
-        if (checkTcpOpenSync('127.0.0.1', 8080, 2000)) return true;
+        if (checkTcpOpenSync('127.0.0.1', readChosenPort(), 2000)) return true;
         await new Promise((r) => setTimeout(r, delayMs));
     }
     return false;

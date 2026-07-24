@@ -6,12 +6,18 @@ $ErrorActionPreference = 'SilentlyContinue'
 $BrainDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $UpdatingFlag = Join-Path $BrainDir 'updating.flag'
 
+# The proxy's local port — the obscure one chosen at install (proxy-port.txt), NOT
+# 8080. Used both to probe the proxy and to point Windows at it. See proxy-port.js.
+$ProxyPort = 49732
+$pf = Join-Path $BrainDir 'proxy-port.txt'
+if (Test-Path $pf) { $v = (Get-Content $pf -Raw -ErrorAction SilentlyContinue).Trim(); if ($v -match '^\d+$') { $ProxyPort = [int]$v } }
+
 # Use 2s timeout; TcpClient.Connect() with no timeout blocks ~21s when nothing is listening (Windows TCP retransmits).
 function Test-ProxyListening {
     $timeoutMs = 2000
     try {
         $tcp = New-Object Net.Sockets.TcpClient
-        $ar = $tcp.BeginConnect('127.0.0.1', 8080, $null, $null)
+        $ar = $tcp.BeginConnect('127.0.0.1', $ProxyPort, $null, $null)
         if ($ar.AsyncWaitHandle.WaitOne($timeoutMs, $false) -and $tcp.Connected) {
             $tcp.EndConnect($ar)
             $tcp.Close()
@@ -36,7 +42,7 @@ if (Test-Path $UpdatingFlag) { $proxyUp = $false }
 if ($proxyUp) {
     # Proxy is running: ensure proxy is ON (restriction active)
     Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -Name ProxyEnable -Value 1 -Type DWord -ErrorAction SilentlyContinue
-    Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -Name ProxyServer -Value '127.0.0.1:8080' -Type String -ErrorAction SilentlyContinue
+    Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -Name ProxyServer -Value "127.0.0.1:$ProxyPort" -Type String -ErrorAction SilentlyContinue
     Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -Name ProxyOverride -Value '<local>' -Type String -ErrorAction SilentlyContinue
     try {
         $k = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings\Connections'

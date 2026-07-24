@@ -43,9 +43,17 @@
     <Priority>7</Priority>
   </Settings>
   <Actions Context="Author">
+    <!-- Launch through wscript + a VBS so the watchdog's PowerShell is created
+         hidden from the start. A task action of "powershell.exe -WindowStyle
+         Hidden" flashes a console window in a real interactive logon (it hides
+         itself only AFTER the console appears) - that was one of the visible
+         black windows reported on real hardware. RunWatchdogLoopHidden.vbs
+         starts WatchdogLoop.ps1 with WshShell.Run intWindowStyle = 0 (no flash).
+         The wscript action returns immediately; the detached WatchdogLoop.ps1
+         is the persistent process (it self-guards against duplicates). -->
     <Exec>
-      <Command>powershell.exe</Command>
-      <Arguments>-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "__BRAIN_DIR__\WatchdogLoop.ps1"</Arguments>
+      <Command>wscript.exe</Command>
+      <Arguments>"__BRAIN_DIR__\RunWatchdogLoopHidden.vbs"</Arguments>
     </Exec>
   </Actions>
 </Task>
