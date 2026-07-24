@@ -54,9 +54,44 @@ function getHardwareId() {
     }
 }
 
+// Single-word outcome for InstallWatcher.bat / WinConfigWizard.ps1 to read after
+// this process exits (Step 7 there redirects our own stdout/stderr to nul, so this
+// file - not console text - is the one reliable, structured signal of WHY
+// enrollment did or didn't happen). Written on every run, success or failure, so a
+// stale reason from a previous attempt is never read as this run's outcome.
+// Non-secret, per-machine state - see .gitignore.
+const REGISTER_STATUS_PATH = path.join(__dirname, 'register-status.txt');
+
+function writeRegisterStatus(reason) {
+    try {
+        fs.writeFileSync(REGISTER_STATUS_PATH, `${reason}\n`, 'utf-8');
+    } catch (e) {
+        // Best-effort only - never let status bookkeeping block the real install.
+    }
+}
+
+// Classifies a postJson() rejection by the hub's actual HTTP status (attached by
+// hub-client.js) instead of the raw error text, so the wizard can show the RIGHT
+// distinct message instead of lumping every registration failure into one generic
+// "reintentar" screen. Mirrors src/app/api/agent/register/route.ts's contract:
+// 401 = bad master code, 409 = this hardware_id already holds a credential
+// (anti-hijack - see route.ts's H2 comment), 429 = rate limited.
+function classifyRegisterError(err) {
+    const status = err && err.statusCode;
+    if (status === 401) return 'bad_code';
+    if (status === 409) return 'already_enrolled';
+    if (status === 429) return 'rate_limited';
+    if (status === 400) return 'invalid_request';
+    if (typeof status === 'number' && status >= 500) return 'server_error';
+    return 'network_error';
+}
+
 async function registerIfNeeded() {
     const existing = readCredential();
-    if (existing) return existing;
+    if (existing) {
+        writeRegisterStatus('ok');
+        return existing;
+    }
 
     const config = readHubConfig();
     // Plaintext master code captured at install. Used here ONCE and never persisted.
@@ -100,13 +135,15 @@ async function registerIfNeeded() {
 if (require.main === module) {
     registerIfNeeded()
         .then((cred) => {
+            writeRegisterStatus('ok');
             console.log(`Registered as machine ${cred.machine_id}`);
             process.exit(0);
         })
         .catch((err) => {
+            writeRegisterStatus(classifyRegisterError(err));
             console.error('Registration failed:', err.message);
             process.exit(1);
         });
 }
 
-module.exports = { registerIfNeeded };
+module.exports = { registerIfNeeded, classifyRegisterError };

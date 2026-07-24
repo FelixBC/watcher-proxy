@@ -40,7 +40,7 @@ const CONFIG = {
 
 // Keep only the last N allowed hosts. Small on purpose: the poll ships this
 // straight into a bounded column on the machine row (no growing history).
-const MAX_VISITS = 3;
+const MAX_VISITS = 25; // rolling buffer of recent allowed pages (matches the blocked-list depth in the fleet)
 
 // Keep the local blocked-requests log to ~15 days so it can't grow forever.
 // The dashboard/DB is the durable history; this file is just the buffer the
@@ -190,23 +190,49 @@ function recordVisit(host) {
     recordFirstOfDay(host);
 }
 
-// The first allowed host of the LOCAL calendar day — overwritten only when the
-// day rolls over, so it survives watchdog restarts within the same day. Cheap:
-// after the first visit of the day it's a no-op (reads a tiny file).
+// Hosts that phone home on their OWN at boot/idle — Windows/Office/Edge telemetry,
+// connectivity probes, update channels, MSN/Bing new-tab junk, Chrome's updater.
+// These fire without the cajero doing anything, so they mark ~power-on, not work.
+// Used ONLY to tell "1ª página con ruido" (first anything) from "1ª sin ruido"
+// (first REAL page ≈ when the cajero opened the banca). Substring match, lowercased.
+// A lottery terminal never browses these as work, so false-positives are harmless;
+// the banca (konfyanslotto/elite21) is deliberately absent → it counts as real.
+const BACKGROUND_NOISE = [
+    'msftconnecttest.com', 'msftncsi.com', 'connecttest', 'connectivitycheck', 'dns.google',
+    'windowsupdate.com', 'update.microsoft', 'delivery.mp.microsoft', 'do.dsp.mp.microsoft',
+    'dl.delivery.mp.microsoft', 'ctldl.windowsupdate.com', 'edgedl', 'time.windows.com',
+    'events.data.microsoft.com', 'settings-win.data.microsoft.com', 'watson.telemetry',
+    'vortex.data.microsoft', 'telemetry.microsoft', 'v10.events.data', 'v20.events.data',
+    'edge.microsoft.com', 'edge-consumer-static', 'edge-mobile-static',
+    'msn.com', 'img-s-msn-com', 'sfx.ms', 'live.net', 'login.live.com', 'skype',
+    'microsoft365.com', 'officehub', 'officeapps.live.com', 'office.net', 'office365.com',
+    'bing.com', 'clients2.google.com', 'clients4.google.com', 'update.googleapis',
+    'gvt1.com', 'gvt2.com',
+];
+function isBackgroundNoise(host) {
+    if (!host) return true; // no host → never counts as a real first page
+    const h = String(host).toLowerCase();
+    return BACKGROUND_NOISE.some((n) => h.includes(n));
+}
+
+// The first allowed hosts of the LOCAL calendar day, kept as TWO values so the
+// fleet can show power-on vs. cajero-start: `host`/`at` = first ANYTHING (con
+// ruido), `realHost`/`realAt` = first NON-noise page (sin ruido). Overwritten
+// only when the day rolls over, so both survive watchdog restarts within the day.
+// Cheap: once both are filled for the day it's a no-op (reads a tiny file).
 function recordFirstOfDay(host) {
     try {
         const today = new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD (local)
+        const now = new Date().toISOString();
         let cur = null;
         if (fs.existsSync(CONFIG.FIRST_VISIT_FILE)) {
             cur = JSON.parse(fs.readFileSync(CONFIG.FIRST_VISIT_FILE, 'utf-8'));
         }
-        if (!cur || cur.day !== today) {
-            fs.writeFileSync(
-                CONFIG.FIRST_VISIT_FILE,
-                JSON.stringify({ host, at: new Date().toISOString(), day: today }),
-                'utf-8'
-            );
-        }
+        if (!cur || cur.day !== today) cur = { day: today };
+        let changed = false;
+        if (!cur.host) { cur.host = host; cur.at = now; changed = true; }             // 1ª con ruido
+        if (!cur.realHost && !isBackgroundNoise(host)) { cur.realHost = host; cur.realAt = now; changed = true; } // 1ª sin ruido
+        if (changed) fs.writeFileSync(CONFIG.FIRST_VISIT_FILE, JSON.stringify(cur), 'utf-8');
     } catch { /* fail-open */ }
 }
 

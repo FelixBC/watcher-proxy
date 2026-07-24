@@ -103,6 +103,12 @@ EXCLUDE_PATHS=(
     "README.txt"
     "ARCHITECTURE.md"
     "docs"
+    # Instalar.bat predates Instalar.exe (v1.0.19, same behaviour, carries the gear
+    # icon in Explorer). Both were shipping side by side with nothing telling a
+    # banca worker which to use - confirmed source of "2 instalar, no se cual usar"
+    # confusion. Instalar.exe is now the ONE launcher on the machine; Instalar.bat
+    # stays in the repo (git-tracked) as a manual dev fallback only, not packaged.
+    "Instalar.bat"
 )
 
 is_excluded() {
@@ -189,7 +195,8 @@ for bad in \
     "uninstall-code.hash" \
     "machine-name.txt" "machine-zone.txt" "machine-code.txt" \
     "WatcherBrain/whitelist-version.txt" \
-    "WatcherBrain/updating.flag" "WatcherBrain/unplugged.flag"; do
+    "WatcherBrain/updating.flag" "WatcherBrain/unplugged.flag" \
+    "WatcherBrain/register-status.txt"; do
     if [[ -e "$WINCONFIG_DIR/$bad" ]]; then
         echo "ERROR: secret/machine-state file '$bad' ended up in the stage — aborting, nothing written." >&2
         exit 1

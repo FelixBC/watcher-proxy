@@ -85,7 +85,16 @@ function postJson(hubUrl, pathname, body, timeoutMs) {
                     if (res.statusCode >= 200 && res.statusCode < 300) {
                         resolve(parsed);
                     } else {
-                        reject(new Error(`hub ${pathname} returned ${res.statusCode}: ${data}`));
+                        // statusCode/body attached (not just baked into .message) so callers
+                        // that need to tell failure REASONS apart (e.g. register-with-hub.js
+                        // distinguishing 401 bad-code from 409 already-enrolled) can branch on
+                        // structured data instead of parsing the message string. Additive only
+                        // - existing callers (poll-hub.js) that just read err.message are
+                        // unaffected.
+                        const err = new Error(`hub ${pathname} returned ${res.statusCode}: ${data}`);
+                        err.statusCode = res.statusCode;
+                        err.body = parsed;
+                        reject(err);
                     }
                 });
             }

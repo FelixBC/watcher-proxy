@@ -23,5 +23,8 @@ WatcherBrain/whitelist-version.txt
 WatcherBrain/poll-log-cursor.txt
 # Per-machine chosen proxy port (written at install by proxy-port.js select).
 WatcherBrain/proxy-port.txt
+# Per-machine last register-with-hub.js outcome (ok/already_enrolled/bad_code/...),
+# read by WinConfigWizard.ps1 to show a specific result screen. Not secret.
+WatcherBrain/register-status.txt
 WatcherBrain/update.log
 WatcherBrain/_backup_*/

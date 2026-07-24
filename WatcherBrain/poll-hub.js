@@ -180,7 +180,7 @@ function readRecentVisits() {
         if (!Array.isArray(parsed)) return [];
         return parsed
             .filter((v) => v && typeof v.host === 'string' && typeof v.at === 'string')
-            .slice(0, 3);
+            .slice(0, 25);
     } catch (e) {
         return [];
     }
@@ -282,7 +282,12 @@ function readFirstVisit() {
         if (!fs.existsSync(FIRST_VISIT_PATH)) return null;
         const v = JSON.parse(fs.readFileSync(FIRST_VISIT_PATH, 'utf-8'));
         if (v && typeof v.host === 'string' && typeof v.at === 'string') {
-            return { host: v.host, at: v.at };
+            const out = { host: v.host, at: v.at }; // 1ª con ruido
+            if (typeof v.realHost === 'string' && typeof v.realAt === 'string') {
+                out.realHost = v.realHost; // 1ª sin ruido
+                out.realAt = v.realAt;
+            }
+            return out;
         }
         return null;
     } catch (e) {
