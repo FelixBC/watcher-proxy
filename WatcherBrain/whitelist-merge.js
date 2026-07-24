@@ -57,9 +57,32 @@ function readCurrent(whitelistPath) {
     return parse(fs.readFileSync(whitelistPath, 'utf-8'));
 }
 
+// Write `content` to an EXISTING file in place (open r+ → truncate → write)
+// instead of fs.writeFileSync. On Windows, writeFileSync opens with CREATE_ALWAYS,
+// which FAILS with EPERM when the target carries the Hidden+System attributes that
+// the install's disguise sets on whitelist.txt — so every poll that tried to apply
+// a pushed whitelist died with "EPERM: operation not permitted, open ...whitelist.txt"
+// and the machine never synced with the hub. Opening the existing file r+ preserves
+// those attributes and avoids the EPERM. Falls back to writeFileSync only when the
+// file does not exist yet (a fresh file has nothing to preserve).
+function writeInPlace(filePath, content) {
+    if (!fs.existsSync(filePath)) {
+        fs.writeFileSync(filePath, content, 'utf-8');
+        return;
+    }
+    const buf = Buffer.from(content, 'utf-8');
+    const fd = fs.openSync(filePath, 'r+');
+    try {
+        fs.ftruncateSync(fd, 0);
+        fs.writeSync(fd, buf, 0, buf.length, 0);
+    } finally {
+        fs.closeSync(fd);
+    }
+}
+
 function applyPushedWhitelist(whitelistPath, newManagedEntries) {
     const { extraLines } = readCurrent(whitelistPath);
-    fs.writeFileSync(whitelistPath, render(newManagedEntries, extraLines), 'utf-8');
+    writeInPlace(whitelistPath, render(newManagedEntries, extraLines));
 }
 
 function getReportableExtras(whitelistPath) {

@@ -380,6 +380,15 @@ function Start-Action {
         $script:proc.StandardInput.Close()
     } catch {
         # Could not even start the process — leave the machine untouched and say so.
+        # Log the REAL exception to a file (invisible to the banca worker, so the
+        # disguise holds) — the generic UI message alone made a Start() failure
+        # impossible to diagnose during rollout. Read WatcherBrain\wizard-error.log
+        # to see why cmd.exe could not be launched.
+        try {
+            $errLog = Join-Path $BrainDir 'wizard-error.log'
+            $line = '[{0}] Start failed: {1}: {2}' -f (Get-Date).ToUniversalTime().ToString('o'), $_.Exception.GetType().FullName, $_.Exception.Message
+            Add-Content -Path $errLog -Value $line -ErrorAction SilentlyContinue
+        } catch { }
         $master = $null; $script:tbMaster.Text = ''
         Show-Result $false 'No se pudo iniciar' @('No se pudo iniciar la configuracion.', 'El equipo no fue modificado. Intenta de nuevo.') $true
         return
