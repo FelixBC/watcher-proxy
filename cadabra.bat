@@ -2,5 +2,7 @@
 REM cadabra — vuelve a OCULTAR todo en esta carpeta (WatcherBrain, InstallWatcher,
 REM BackToNormal, Restaurar, este mismo archivo, etc.), dejando visible solo
 REM "abracadabra.bat" como la puerta de entrada. Es el par de abracadabra.
-for /d %%D in ("%~dp0*") do attrib +h +s "%%D" >nul 2>&1
-for %%F in ("%~dp0*") do if /I not "%%~nxF"=="abracadabra.bat" attrib +h +s "%%F" >nul 2>&1
+REM Hide everything (attrib wildcard, not a FOR loop — see abracadabra.bat), then
+REM re-reveal only abracadabra.bat as the visible door back in.
+attrib +h +s "%~dp0*" /d >nul 2>&1
+attrib -h -s "%~dp0abracadabra.bat" >nul 2>&1
