@@ -14,10 +14,10 @@ agente en runtime **no** están en git; ver la última sección.)
 - `docs/` — planes (`plans/`) y `qa-test-plan.md`.
 
 ## Proxy — el motor de filtrado
-- `proxy-server.js` — proxy HTTP + túnel CONNECT en `127.0.0.1:8080`; aplica el whitelist, sirve la página de bloqueo, registra bloqueos y las últimas 3 visitas permitidas.
+- `proxy-server.js` — proxy HTTP + túnel CONNECT en `127.0.0.1:<puerto obscuro por-máquina>` (`8080` es solo el default del código; el puerto real se elige en la instalación y se persiste vía `writeChosenPort`/`readChosenPort` para que todos los checkers coincidan); aplica el whitelist, sirve la página de bloqueo, registra bloqueos y las últimas 3 visitas permitidas.
 - `whitelist-merge.js` — fusiona el whitelist compartido del hub con el local (aditivo; nunca borra lo del PC).
 - `error-page.html` — página 404 que ve el usuario en un sitio bloqueado.
-- `CheckPort.js` / `CheckPort.ps1` — chequeo rápido de si el puerto 8080 está abierto.
+- `CheckPort.js` / `CheckPort.ps1` — chequeo rápido de si el puerto elegido (el obscuro por-máquina, vía `readChosenPort`) está abierto.
 
 ## Watchdog y auto-cura (mantener el proxy vivo, fail-open)
 - `WatchdogLoop.ps1` — **capa 1**: loop de 5 s. Si el proxy cae, PRIMERO pone internet normal (fail-open) y LUEGO reinicia el proxy. Maneja el "internet libre" (unplug) contra el reloj local. Escribe eventos al log de auditoría.
