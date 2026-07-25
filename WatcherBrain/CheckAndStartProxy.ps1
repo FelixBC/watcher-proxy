@@ -20,6 +20,26 @@ $BrainDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $StartWatcherPath = Join-Path $BrainDir 'StartWatcher.vbs'
 $UnpluggedFlagPath = Join-Path $BrainDir 'unplugged.flag'
 
+# Stale-flag guard (see docs/plans/0006). An orphaned updating.flag — self-update
+# killed before it could clear the flag (Defender, power loss, reboot) — would
+# otherwise freeze this layer forever: it never starts the proxy, leaving the machine
+# unfiltered + proxy-down indefinitely. Treat a flag older than STALE_FLAG_MINUTES as
+# ABSENT so an orphan self-heals; mirrors self-update.js's LOCK_STALE_MS. BOTH sides
+# UTC: the flag is written as new Date().toISOString() (UTC) and the fleet runs
+# Eastern (UTC-4/5) — a local-vs-UTC subtraction would read ~240min for a 1-second-old
+# flag and defeat the guard on EVERY update, invisible to any UTC test. Same
+# .ToUniversalTime()-both-sides idiom used for the unplugged.flag resume time above.
+function Test-UpdatingActive([string]$flagPath) {
+    if (-not (Test-Path $flagPath)) { return $false }
+    $STALE_FLAG_MINUTES = 15  # > max legit update (~8min: patient 300s + rollback + overhead);
+                              # coupled to self-update.js's health window — if that grows, re-derive.
+    try {
+        $ageMin = ((Get-Date).ToUniversalTime() - (Get-Item $flagPath).LastWriteTimeUtc).TotalMinutes
+        if ($ageMin -gt $STALE_FLAG_MINUTES) { return $false }
+    } catch { }
+    return $true
+}
+
 # The proxy's local port — the obscure one chosen at install (proxy-port.txt), NOT
 # 8080. See proxy-port.js.
 $ProxyPort = 49732
@@ -102,7 +122,7 @@ function Test-ProxyListening {
 # (SetProxyByAvailability honors the same flag) and get out; self-update
 # rebuilds the proxy and clears the flag when it's done.
 $UpdatingFlagPath = Join-Path $BrainDir 'updating.flag'
-if (Test-Path $UpdatingFlagPath) {
+if (Test-UpdatingActive $UpdatingFlagPath) {
     $normalScript = Join-Path $BrainDir 'SetProxyByAvailability.ps1'
     if (Test-Path $normalScript) { & $normalScript | Out-Null }
     exit 0

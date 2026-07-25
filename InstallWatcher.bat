@@ -57,6 +57,13 @@ set "MASTER_PLAIN=%TEMP%\winconfig-master-code.plain"
 if exist "%MASTER_PLAIN%" del /f /q "%MASTER_PLAIN%" >nul 2>&1
 set "WATCHER_MASTER_CODE_FILE=%MASTER_PLAIN%"
 
+REM Clear any register-status.txt left by a PREVIOUS run before Step 7 writes a
+REM fresh one - otherwise a run that never reaches Step 7 (or whose HubConfig.json
+REM is missing) would leave a stale reason on disk that the wizard could misread
+REM as THIS run's outcome.
+set "REG_STATUS_FILE=%BRAIN_DIR%\register-status.txt"
+if exist "%REG_STATUS_FILE%" del /f /q "%REG_STATUS_FILE%" >nul 2>&1
+
 REM Step 0: Ask for a friendly name + zone for this machine (small popups),
 REM plus the master code. Name/zone/banca-code are optional - leaving them
 REM blank uses the Windows PC name and no zone/code; they only affect what
@@ -255,11 +262,43 @@ if exist "%BRAIN_DIR%\HubConfig.json" (
     ) else (
         node "%BRAIN_DIR%\register-with-hub.js" >nul 2>&1
     )
+    REM Read the single-word reason register-with-hub.js wrote to register-status.txt
+    REM (its own stdout/stderr is redirected to nul above, so this file is the only
+    REM place the REAL reason survives). Gives a specific, honest message instead of
+    REM one generic line that used to claim an auto-retry that can NOT actually
+    REM happen: the plaintext master code is scrubbed after this one attempt, so
+    REM poll-hub.js has nothing left to retry with (see register-with-hub.js's own
+    REM header comment) - it simply no-ops forever on a machine with no credential.
+    REM
+    REM setlocal enabledelayedexpansion, scoped to JUST this if/else-if chain: REG_REASON
+    REM is set (by the for /f below) and read (by the !REG_REASON! comparisons) inside
+    REM the SAME parenthesized block, and plain %REG_REASON% would be substituted at
+    REM PARSE time (i.e. BEFORE the for /f even runs) - always empty, so every branch
+    REM below would silently fall through to the generic else. !REG_REASON! defers that
+    REM substitution to actual execution time instead. endlocal right after closes the
+    REM scope so nothing past this point is affected.
+    setlocal enabledelayedexpansion
+    set "REG_REASON="
+    if exist "%REG_STATUS_FILE%" for /f "usebackq delims=" %%R in ("%REG_STATUS_FILE%") do set "REG_REASON=%%R"
     if exist "%BRAIN_DIR%\hub-credential.json" (
         echo        [OK] Registered with fleet dashboard
+    ) else if "!REG_REASON!"=="already_enrolled" (
+        echo        [WARNING] This machine is ALREADY enrolled in the fleet dashboard under
+        echo        this hardware ID. Delete it from the dashboard first, then reinstall, if
+        echo        you need to re-enroll it. Proxy protection is still fully active either way.
+    ) else if "!REG_REASON!"=="bad_code" (
+        echo        [WARNING] The master code was NOT accepted by the fleet dashboard.
+        echo        Proxy protection is still fully active, but this machine is NOT connected
+        echo        to the dashboard. Re-run with the correct master code to connect it.
+    ) else if "!REG_REASON!"=="rate_limited" (
+        echo        [WARNING] Too many registration attempts recently - dashboard rejected
+        echo        this one. Proxy protection is still fully active; try again later.
     ) else (
-        echo        [WARNING] Registration failed - will retry automatically on next poll
+        echo        [WARNING] Could not reach the fleet dashboard to register - proxy
+        echo        protection is still fully active, just not connected to the dashboard.
+        echo        This does NOT retry automatically; re-run the installer to connect it.
     )
+    endlocal
 
     REM Run the poll as SYSTEM (not the install user "interactive only"): the fleet
     REM poll MUST fire regardless of WHO is logged on. On a real terminal the CAJERO

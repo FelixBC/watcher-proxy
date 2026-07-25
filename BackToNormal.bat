@@ -169,25 +169,49 @@ REM attempted here as a best-effort; the ADMIN_CLEANUP block does the real
 REM uninstall.
 net stop WinConfigSvc >nul 2>&1
 
-REM If we were invoked with "admin" arg, run admin-only cleanup and exit.
+REM ── SYSTEM-level cleanup (tasks/service/All-Users shortcut) needs admin. Three
+REM cases, and only ONE of them ever opens a second window:
+REM   (a) we ARE the elevated child (spawned with "admin")   -> do it, this window.
+REM   (b) first pass, ALREADY elevated (ran "as administrator") -> do it in THIS
+REM       window, NO second window. This is the common operator case: deciding by
+REM       the "admin" ARG alone (as before) re-spawned a needless 2nd window even
+REM       when already elevated; we now check net session and finish in place.
+REM   (c) first pass, NOT elevated -> relaunch via UAC (the one unavoidable second
+REM       window), hand the job to it, and close this one.
 if /I "%~1"=="admin" goto :ADMIN_CLEANUP
 
-REM Non-admin path: remove current user's Startup shortcut now, and request elevation for system cleanup.
-echo [3/5] Removing current user's startup shortcut...
+REM Current user's Startup shortcut is HKCU-level (no admin) - remove it in every case.
+echo [3/4] Removing current user's startup shortcut...
 set "USER_STARTUP=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"
 set "SHORTCUT=WinConfig.lnk"
 if exist "%USER_STARTUP%\%SHORTCUT%" del "%USER_STARTUP%\%SHORTCUT%" >nul 2>&1
 echo        [OK] User startup shortcut removed
 timeout /t 1 /nobreak >nul
 
-REM Request admin to remove scheduled tasks + All Users shortcut (SYSTEM tasks require admin)
-echo [4/5] Removing scheduled tasks and All Users startup shortcut...
-powershell -NoProfile -NonInteractive -Command "Start-Process -FilePath '%~f0' -ArgumentList 'admin' -Verb RunAs" >nul 2>&1
-echo        [OK] If prompted, click Yes to finish removal
-timeout /t 1 /nobreak >nul
+REM (b) Already admin? Finish everything right here - single window, no UAC re-spawn.
+net session >nul 2>&1
+if not errorlevel 1 (
+    echo [4/4] Ya eres administrador - terminando la limpieza en esta misma ventana...
+    goto :ADMIN_CLEANUP
+)
 
-echo [5/5] Done for this user.
-goto :DONE
+REM (c) Not elevated: request UAC. This is the ONLY case that opens a second window.
+REM Hand the SYSTEM cleanup to that elevated window and close this one on success.
+REM Internet is already restored above, so a declined UAC still leaves browsing OK.
+echo [4/4] Solicitando permiso de administrador para terminar la limpieza...
+powershell -NoProfile -NonInteractive -Command "try { Start-Process -FilePath '%~f0' -ArgumentList 'admin' -Verb RunAs -ErrorAction Stop } catch { exit 1 }"
+if errorlevel 1 goto :UAC_DECLINED
+REM Elevated window launched; it shows the final "Listo". Close this one.
+exit /b 0
+
+:UAC_DECLINED
+echo.
+echo No se dio el permiso de administrador, asi que las tareas de sistema quedaron
+echo sin quitar. Tu internet YA esta normal (proxy apagado). Para terminar, vuelve a
+echo correr BackToNormal.bat con click derecho ^> Ejecutar como administrador.
+echo.
+pause
+exit /b 1
 
 :ADMIN_CLEANUP
 REM Admin-only removal (does NOT touch HKCU of the admin account beyond what already happened)

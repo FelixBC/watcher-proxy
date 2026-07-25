@@ -296,6 +296,35 @@ function Read-LogText {
     } catch { return '' }
 }
 
+# register-with-hub.js (called from InstallWatcher.bat Step 7) writes a single-word
+# reason here after every attempt - its own stdout/stderr is redirected to nul by
+# the .bat, so this file is the only reliable, structured signal of WHY fleet
+# enrollment did or didn't happen (vs. string-matching disguise-language log text).
+function Read-RegisterReason {
+    $p = Join-Path $BrainDir 'register-status.txt'
+    if (-not (Test-Path $p)) { return $null }
+    try { return (Get-Content -Path $p -Raw -ErrorAction Stop).Trim() } catch { return $null }
+}
+
+# On a hard failure (.bat exit <> 0), the on-screen message used to be identical no
+# matter WHICH of several unrelated things aborted the install (missing banca code,
+# Node download failure, uninstall-hash-store failure, ...) - Felix read that as "my
+# code was wrong" every time. Pull the last actionable ERROR/ABORT line out of the
+# captured log so the real reason is visible on screen instead of only in
+# wizard-error.log. None of these messages leak disguise-breaking words (checked:
+# they talk about master/banca codes, Node, downloads - never "proxy"/"Watcher").
+function Get-LastErrorHint([string]$text) {
+    if (-not $text) { return $null }
+    $hint = $null
+    foreach ($ln in ($text -split "`r?`n")) {
+        if ($ln -match '(?i)\[ERROR\]|ERROR:|ABORTED|ABORTADO') {
+            $t = $ln.Trim()
+            if ($t.Length -gt 0) { $hint = $t }
+        }
+    }
+    return $hint
+}
+
 function On-Finished {
     $script:timer.Stop()
     $exit = -1
@@ -317,9 +346,30 @@ function On-Finished {
     if ($Mode -eq 'Install') {
         if ($exit -eq 0) {
             $bar.Value = 100
-            Show-Result $true 'Todo listo' @('Configuracion aplicada', 'Conectado al panel', 'Proteccion activa') $false
+            # InstallWatcher.bat Step 7 (fleet registration) is INTENTIONALLY non-fatal:
+            # a machine still gets full local protection even if the dashboard rejects
+            # or can't be reached, so the .bat's exit code alone can't tell "fully
+            # connected" apart from "connected locally, not on the panel". Read the
+            # register-status.txt reason to show the RIGHT one of those instead of
+            # always claiming "Conectado al panel".
+            $reason = Read-RegisterReason
+            if ($reason -eq 'already_enrolled') {
+                Show-Result $true 'Listo (ya estaba registrado)' @('Configuracion aplicada, proteccion activa.', 'Este equipo ya figuraba en el panel:', 'si necesitas re-registrarlo, borralo del', 'panel primero y vuelve a instalar.') $false
+            } elseif ($reason -eq 'bad_code') {
+                Show-Result $false 'Codigo no aceptado por el panel' @('La proteccion quedo activa en el equipo,', 'pero el panel no acepto el codigo maestro.', 'Verifica el codigo con el administrador', 'y vuelve a intentarlo.') $true
+            } elseif ($reason -eq 'rate_limited') {
+                Show-Result $true 'Listo (panel ocupado)' @('Configuracion aplicada, proteccion activa.', 'El panel rechazo la conexion por demasiados', 'intentos recientes: probalo de nuevo mas tarde.') $false
+            } elseif ($reason -and $reason -ne 'ok') {
+                Show-Result $true 'Listo (sin conexion al panel)' @('Configuracion aplicada, proteccion activa.', 'No se pudo conectar con el panel ahora;', 'no reintenta solo - vuelve a instalar mas', 'tarde para conectarlo.') $false
+            } else {
+                Show-Result $true 'Todo listo' @('Configuracion aplicada', 'Conectado al panel', 'Proteccion activa') $false
+            }
         } else {
-            Show-Result $false 'No se pudo completar' @('El equipo quedo en su estado normal:', 'internet sin cambios, nada a medias.', 'Puedes volver a intentarlo.') $true
+            $hint = Get-LastErrorHint $out
+            $lines = @('El equipo quedo en su estado normal:', 'internet sin cambios, nada a medias.')
+            if ($hint) { $lines += ('Motivo: ' + $hint) }
+            $lines += 'Puedes volver a intentarlo.'
+            Show-Result $false 'No se pudo completar' $lines $true
         }
     } else {
         if ($exit -eq 0) {

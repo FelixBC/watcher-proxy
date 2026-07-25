@@ -6,6 +6,26 @@ $ErrorActionPreference = 'SilentlyContinue'
 $BrainDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $UpdatingFlag = Join-Path $BrainDir 'updating.flag'
 
+# Stale-flag guard (see docs/plans/0006). An orphaned updating.flag — self-update
+# killed before it could clear the flag (Defender, power loss, reboot) — would
+# otherwise freeze this layer forever: it never restores PE=1, leaving the machine
+# unfiltered + proxy-down indefinitely. Treat a flag older than STALE_FLAG_MINUTES as
+# ABSENT so an orphan self-heals; mirrors self-update.js's LOCK_STALE_MS. BOTH sides
+# UTC: the flag is written as new Date().toISOString() (UTC) and the fleet runs
+# Eastern (UTC-4/5) — a local-vs-UTC subtraction would read ~240min for a 1-second-old
+# flag and defeat the guard on EVERY update, invisible to any UTC test. Same
+# .ToUniversalTime()-both-sides idiom used for unplugged.flag resume times.
+function Test-UpdatingActive([string]$flagPath) {
+    if (-not (Test-Path $flagPath)) { return $false }
+    $STALE_FLAG_MINUTES = 15  # > max legit update (~8min: patient 300s + rollback + overhead);
+                              # coupled to self-update.js's health window — if that grows, re-derive.
+    try {
+        $ageMin = ((Get-Date).ToUniversalTime() - (Get-Item $flagPath).LastWriteTimeUtc).TotalMinutes
+        if ($ageMin -gt $STALE_FLAG_MINUTES) { return $false }
+    } catch { }
+    return $true
+}
+
 # The proxy's local port — the obscure one chosen at install (proxy-port.txt), NOT
 # 8080. Used both to probe the proxy and to point Windows at it. See proxy-port.js.
 $ProxyPort = 49732
@@ -37,7 +57,7 @@ $proxyUp = Test-ProxyListening
 # FULLY DOWN. Treat "updating" as proxy-down so this always forces NORMAL
 # internet (fail-open); self-update.js clears the flag once the proxy is
 # healthy again, and the next cycle restores filtering.
-if (Test-Path $UpdatingFlag) { $proxyUp = $false }
+if (Test-UpdatingActive $UpdatingFlag) { $proxyUp = $false }
 
 if ($proxyUp) {
     # Proxy is running: ensure proxy is ON (restriction active)

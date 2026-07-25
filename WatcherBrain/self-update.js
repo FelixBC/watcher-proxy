@@ -14,6 +14,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');
+const net = require('net');
 
 const { BRAIN_DIR, downloadFile } = require('./hub-client');
 const { appendEvent } = require('./event-log');
@@ -48,6 +49,32 @@ const LOCK_STALE_MS = 20 * 60 * 1000;
 // dead 127.0.0.1:8080 = internet fully down.
 const UPDATING_FLAG_PATH = path.join(BRAIN_DIR, 'updating.flag');
 
+// Post-update health is a GENEROUS CEILING, not a tight fit. waitForHealthy
+// EARLY-RETURNS the instant the port opens, so a healthy proxy costs only its real
+// startup time; this total only bounds how long we wait for a genuinely-dead version
+// before rolling back. On real hardware the post-swap cold-start (node re-scanned by
+// Defender over the freshly-copied tree) was ~60-90s (worst 91s in the field logs
+// that produced the 44-min loop) — the old blind 15s rolled back a proxy that was
+// coming up fine. 300s covers slower fleet HW with margin. See docs/plans/0006.
+// COUPLING: the watchdog .ps1 layers treat updating.flag as stale after
+// STALE_FLAG_MINUTES (15) — keep patient + rollback + overhead well under that; if
+// you grow this window, re-derive STALE_FLAG_MINUTES in the three .ps1 consumers.
+const HEALTH_POLL_MS = 3000;
+const PATIENT_HEALTH_RETRIES = 100; // ~300s ceiling (early-returns the instant the port opens)
+// The post-ROLLBACK health check stays SHORT: it gates nothing safety-critical
+// (fail-open holds regardless, and the watchdog brings the restored old proxy up),
+// so there's no reason to hold updating.flag for a second long window.
+const ROLLBACK_HEALTH_RETRIES = 5; // ~15s
+
+// Failed-version cooldown marker. Written ONLY when a genuine update to a version
+// fails its post-update health check and we roll back (NOT on a pre-swap download/
+// checksum failure — that's transient infra, not the version's fault). poll-hub.js
+// reads it before re-triggering and will NOT re-run self-update for the SAME failed
+// version within the cooldown, so a bad version can't re-loop every 2-min poll (the
+// ~44-min loop's engine). A strictly newer version bypasses it (forward-only).
+// Runtime-created + plain (not Hidden+System) → a normal writeFileSync is fine.
+const UPDATE_FAILED_PATH = path.join(BRAIN_DIR, 'update-failed.json');
+
 function acquireLock() {
     try {
         if (fs.existsSync(LOCK_PATH)) {
@@ -63,6 +90,21 @@ function acquireLock() {
 
 function releaseLock() {
     try { fs.unlinkSync(LOCK_PATH); } catch (e) {}
+}
+
+// Failed-version cooldown (see UPDATE_FAILED_PATH note). recordFailedVersion is
+// written ONLY when a genuine update fails its post-update health check and we roll
+// back — poll-hub.js then refuses to re-trigger that SAME version until the cooldown
+// passes (a strictly newer version bypasses it), so one failed health check can no
+// longer re-fire every 2-min poll. clearFailedVersion drops the marker on success.
+function recordFailedVersion(version) {
+    try {
+        fs.writeFileSync(UPDATE_FAILED_PATH, JSON.stringify({ version, failedAt: new Date().toISOString() }), 'utf-8');
+    } catch (e) { log(`Could not record failed version: ${e.message}`); }
+}
+
+function clearFailedVersion() {
+    try { fs.unlinkSync(UPDATE_FAILED_PATH); } catch (e) {}
 }
 
 async function downloadWithRetry(url, dest, timeoutMs, attempts, onEvent) {
@@ -90,6 +132,7 @@ const PROTECTED_RELATIVE_PATHS = [
     'WatcherBrain/uninstall-code.hash',
     'WatcherBrain/unplugged.flag',
     'WatcherBrain/updating.flag',
+    'WatcherBrain/update-failed.json',
     'WatcherBrain/whitelist-version.txt',
     'WatcherBrain/proxy-port.txt',
     'WatcherBrain/poll-log-cursor.txt',
@@ -250,22 +293,35 @@ function startProxyAndWatchdog() {
     execFileSync('wscript.exe', [path.join(BRAIN_DIR, 'StartWatcher.vbs'), 'nocheck']);
 }
 
-function checkTcpOpenSync(host, port, timeoutMs) {
-    try {
-        execFileSync('powershell.exe', [
-            '-NoProfile', '-NonInteractive',
-            '-File', path.join(BRAIN_DIR, 'CheckPort.ps1'),
-            '-Port', String(port), '-TimeoutMs', String(timeoutMs)
-        ], { stdio: 'ignore' });
-        return true; // CheckPort.ps1 exits 0 when the port is open
-    } catch (e) {
-        return false;
-    }
+// In-process TCP reachability check: connect to host:port, resolve true if it
+// accepts within timeoutMs, false otherwise. Replaces spawning a powershell
+// (CheckPort.ps1) on EVERY check — that child-process launch added ~2.5s of
+// overhead per check, stretching the patient window from its nominal
+// retries×delay (~300s) to ~555s wall-clock (measured on the test PC). An
+// in-process net.connect keeps each failing check ≈ the delay only, so the window
+// is predictable and updating.flag isn't held longer than intended.
+// (StartWatcher.vbs and the watchdog .ps1 scripts still use CheckPort.ps1 — unchanged.)
+function checkTcpOpen(host, port, timeoutMs) {
+    return new Promise((resolve) => {
+        const sock = new net.Socket();
+        let settled = false;
+        const finish = (ok) => {
+            if (settled) return;
+            settled = true;
+            try { sock.destroy(); } catch (_) {}
+            resolve(ok);
+        };
+        sock.setTimeout(timeoutMs);
+        sock.once('connect', () => finish(true));
+        sock.once('timeout', () => finish(false));
+        sock.once('error', () => finish(false));
+        try { sock.connect(port, host); } catch (_) { finish(false); }
+    });
 }
 
 async function waitForHealthy(retries, delayMs) {
     for (let i = 0; i < retries; i++) {
-        if (checkTcpOpenSync('127.0.0.1', readChosenPort(), 2000)) return true;
+        if (await checkTcpOpen('127.0.0.1', readChosenPort(), 2000)) return true;
         await new Promise((r) => setTimeout(r, delayMs));
     }
     return false;
@@ -349,6 +405,12 @@ async function main() {
     const backupDir = backupCurrent(localVersion);
     log(`Backed up current install to ${backupDir}`);
 
+    // AC5 fail-closed guard: only once we've actually STARTED mutating the install
+    // may the catch's rollback (stop old proxy + restore) run. A failure BEFORE the
+    // swap (download / checksum / extract to temp) must NOT tear down the still-
+    // healthy old proxy for a transient blip — see the catch block.
+    let swapStarted = false;
+
     try {
         log(`Starting download of ${argUrl} to ${tempZip}`);
         await downloadWithRetry(argUrl, tempZip, 60000, 3, (event, detail) => {
@@ -365,6 +427,18 @@ async function main() {
             log('Checksum OK.');
         }
 
+        // Extract to the Defender-excluded temp dir BEFORE we touch the proxy. A
+        // corrupt/failed archive then fails while the OLD proxy is still up and
+        // filtering, so the catch's !swapStarted branch can safely do nothing (no
+        // proxy was stopped, nothing to restart). Only copyTree below mutates the
+        // real install. (Extracting after the stop would leave filtering down for the
+        // watchdog delay + a cold-start on a bad-archive failure — avoided by ordering.)
+        fs.mkdirSync(tempExtract, { recursive: true });
+        execFileSync('powershell.exe', [
+            '-NoProfile', '-NonInteractive', '-Command',
+            `Expand-Archive -Path '${tempZip}' -DestinationPath '${tempExtract}' -Force`
+        ]);
+
         // GOLDEN RULE: normal internet before the proxy is touched. Raise the
         // updating flag FIRST (before the flip) so every watchdog layer forces
         // normal internet and keeps its hands off the proxy for the whole swap.
@@ -375,31 +449,43 @@ async function main() {
         flipToNormalInternet();
         stopProxyAndWatchdog();
 
-        fs.mkdirSync(tempExtract, { recursive: true });
-        execFileSync('powershell.exe', [
-            '-NoProfile', '-NonInteractive', '-Command',
-            `Expand-Archive -Path '${tempZip}' -DestinationPath '${tempExtract}' -Force`
-        ]);
-
-        // The hub bundle has files at the extract root (no wrapper folder).
+        // The hub bundle has files at the extract root (no wrapper folder). From
+        // here on the install is being mutated — any failure past this point must
+        // trigger the rollback in the catch (swapStarted gates that).
+        swapStarted = true;
         copyTree(tempExtract, ROOT_DIR, '');
         writeFileInPlace(VERSION_PATH, argVersion); // hub is authoritative
         log('New files copied in.');
 
         startProxyAndWatchdog();
 
-        const healthy = await waitForHealthy(5, 3000);
+        // Patient CEILING: a slow-but-fine proxy (cold-start ~60-90s under Defender)
+        // must not be rolled back. waitForHealthy returns the instant the port opens,
+        // so this only bounds the wait for a genuinely-dead version.
+        const healthy = await waitForHealthy(PATIENT_HEALTH_RETRIES, HEALTH_POLL_MS);
         if (!healthy) {
+            // The new version did not come up healthy within the generous ceiling —
+            // treat it as genuinely bad and roll back to the previous (filtering) one.
             log('Post-update health check FAILED — rolling back.');
             stopProxyAndWatchdog();
             restoreBackup(backupDir);
             writeFileInPlace(VERSION_PATH, localVersion);
+            // Record the FAILED TARGET (argVersion, never localVersion) so poll-hub
+            // won't re-trigger the same version every 2-min poll. Written AFTER
+            // restoreBackup so the restore can't resurrect a stale marker over it.
+            recordFailedVersion(argVersion);
             startProxyAndWatchdog();
-            const rolledBackHealthy = await waitForHealthy(5, 3000);
+            // Hand the proxy back to the watchdog now: clearing the flag here lets the
+            // next watchdog tick restore filtering (PE=1) on the old proxy ASAP instead
+            // of waiting out a second window. (finally unlinks it again — idempotent.)
+            try { fs.unlinkSync(UPDATING_FLAG_PATH); } catch (e) {}
+            // SHORT confirmation only — gates nothing safety-critical (fail-open holds;
+            // the watchdog brings the restored old proxy up regardless).
+            const rolledBackHealthy = await waitForHealthy(ROLLBACK_HEALTH_RETRIES, HEALTH_POLL_MS);
             log(
                 rolledBackHealthy
                     ? 'Rollback successful, previous version restored and healthy.'
-                    : 'Rollback did not come up healthy either — watchdog will keep retrying; internet stays unfiltered until it does (fail-open holds regardless).'
+                    : 'Rollback not confirmed healthy yet — watchdog will keep retrying; fail-open holds regardless.'
             );
             if (rolledBackHealthy) {
                 pruneOldBackups(MAX_BACKUPS_TO_KEEP);
@@ -409,17 +495,30 @@ async function main() {
 
         log(`Update to ${argVersion} successful and healthy.`);
         appendEvent('update-ok', `${localVersion} -> ${argVersion}`);
+        clearFailedVersion(); // success → drop any stale failed-version marker
         pruneOldBackups(MAX_BACKUPS_TO_KEEP);
     } catch (e) {
         appendEvent('update-failed', `${argVersion}: ${describeError(e)}`);
-        log(`Update failed with an error, attempting rollback: ${describeError(e)}`);
-        try {
-            stopProxyAndWatchdog();
-            restoreBackup(backupDir);
-            writeFileInPlace(VERSION_PATH, localVersion);
-            startProxyAndWatchdog();
-        } catch (rollbackErr) {
-            log(`Rollback itself failed: ${rollbackErr.message}. Watchdog remains responsible for fail-open safety.`);
+        if (!swapStarted) {
+            // Failure BEFORE the install was touched (download / checksum / extract to
+            // temp). The OLD proxy is untouched and still filtering (ProxyEnable=1) —
+            // do NOT tear it down for a transient infra blip (e.g. Supabase/CDN hiccup);
+            // that would drop a healthy machine to a ~60-90s cold-start for nothing.
+            // (If the error landed between the flip and the swap, the old proxy is
+            // already stopped and the updating flag is up = fail-open; the watchdog
+            // restarts the intact old code once finally clears the flag.) No cooldown
+            // marker either — the version is not at fault.
+            log(`Update aborted before touching the install (no rollback needed): ${describeError(e)}`);
+        } else {
+            log(`Update failed mid-swap, rolling back: ${describeError(e)}`);
+            try {
+                stopProxyAndWatchdog();
+                restoreBackup(backupDir);
+                writeFileInPlace(VERSION_PATH, localVersion);
+                startProxyAndWatchdog();
+            } catch (rollbackErr) {
+                log(`Rollback itself failed: ${rollbackErr.message}. Watchdog remains responsible for fail-open safety.`);
+            }
         }
     } finally {
         // Cleared only now — the proxy is healthy again (or rollback restored
