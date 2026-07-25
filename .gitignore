@@ -27,4 +27,8 @@ WatcherBrain/proxy-port.txt
 # read by WinConfigWizard.ps1 to show a specific result screen. Not secret.
 WatcherBrain/register-status.txt
 WatcherBrain/update.log
+# Failed-version cooldown marker (self-update.js writes it on a rolled-back update;
+# poll-hub.js honors it). Runtime-only per-machine state — must never be committed
+# or shipped in the /descargar bundle (would block a fresh install's first update).
+WatcherBrain/update-failed.json
 WatcherBrain/_backup_*/

@@ -40,6 +40,14 @@ const LOCATE_PENDING_PATH = path.join(BRAIN_DIR, 'locate-pending.flag');
 const TAMPER_CURSOR_PATH = path.join(BRAIN_DIR, 'tamper-cursor.txt');
 const GET_LOCATION_PS = path.join(BRAIN_DIR, 'GetLocation.ps1');
 const EVENTS_LOG_PATH = path.join(BRAIN_DIR, 'events.log');
+
+// Failed-version cooldown: self-update.js writes update-failed.json {version,failedAt}
+// when a genuine update fails its post-update health check and rolls back. We honor
+// it here so a bad (or too-slow-to-health-check) version can't re-trigger self-update
+// on every 2-min poll — the engine of the ~44-min unfiltered loop. A strictly newer
+// version bypasses it (forward-only, matches isNewerVersion). See docs/plans/0006.
+const UPDATE_FAILED_PATH = path.join(BRAIN_DIR, 'update-failed.json');
+const FAILED_VERSION_COOLDOWN_MS = 60 * 60 * 1000; // 60 min
 const LOCATION_MAX_AGE_MS = 55 * 60 * 1000; // sample ~hourly
 
 // Spread hub hits across this window (anti-thundering-herd). Sized to the ~2-min
@@ -132,6 +140,41 @@ function isNewerVersion(candidate, current) {
         if (x < y) return false;
     }
     return false; // equal → not newer
+}
+
+function clearFailedVersion() {
+    try { fs.unlinkSync(UPDATE_FAILED_PATH); } catch (e) {}
+}
+
+// True when `candidate` is the version that just failed its post-update health check
+// and the cooldown hasn't elapsed — i.e. don't re-trigger self-update for it yet. A
+// STRICTLY NEWER version bypasses the cooldown and clears the stale marker, so a
+// republished fix (higher number) always deploys immediately. A malformed/absent
+// marker degrades to "not cooling down" — never block updates on the golden-rule path.
+function isUpdateCoolingDown(candidate) {
+    let marker;
+    try {
+        marker = JSON.parse(fs.readFileSync(UPDATE_FAILED_PATH, 'utf-8'));
+    } catch (e) {
+        return false; // no marker / unreadable → free to update
+    }
+    if (!marker || !marker.version || !marker.failedAt) return false;
+    // Newer than the failed version → forward-only bypass + clear the stale marker.
+    if (isNewerVersion(candidate, marker.version)) {
+        clearFailedVersion();
+        return false;
+    }
+    // Cool down ONLY the EXACT version that failed. A DIFFERENT version that isn't
+    // newer than the failed one — e.g. the hub repointed from a bad 2.0 back to a
+    // known-good 1.5 that's still forward of this machine's 1.0 — never failed here,
+    // so it must not be blocked by 2.0's cooldown.
+    if (candidate !== marker.version) return false;
+    // The version that failed, still within the cooldown window → skip this trigger.
+    const failedAtMs = Date.parse(marker.failedAt);
+    if (Number.isFinite(failedAtMs) && (Date.now() - failedAtMs) < FAILED_VERSION_COOLDOWN_MS) {
+        return true;
+    }
+    return false; // cooldown elapsed → allow one more attempt (the failure may have been transient)
 }
 
 function isLocallyUnplugged() {
@@ -423,7 +466,13 @@ async function main() {
         isNewerVersion(response.agent_version, localAgentVersion) &&
         response.agent_download_url
     ) {
-        triggerSelfUpdate(response.agent_version, response.agent_download_url, response.agent_sha256);
+        if (isUpdateCoolingDown(response.agent_version)) {
+            // A recent update to this same version failed its health check — don't
+            // re-fire it every 2-min poll. A newer version would have bypassed above.
+            try { appendEvent('update-cooldown', `skipping ${response.agent_version} (recent failed attempt)`); } catch (e) {}
+        } else {
+            triggerSelfUpdate(response.agent_version, response.agent_download_url, response.agent_sha256);
+        }
     }
 }
 

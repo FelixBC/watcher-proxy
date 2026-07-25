@@ -196,6 +196,7 @@ for bad in \
     "machine-name.txt" "machine-zone.txt" "machine-code.txt" \
     "WatcherBrain/whitelist-version.txt" \
     "WatcherBrain/updating.flag" "WatcherBrain/unplugged.flag" \
+    "WatcherBrain/update-failed.json" \
     "WatcherBrain/register-status.txt"; do
     if [[ -e "$WINCONFIG_DIR/$bad" ]]; then
         echo "ERROR: secret/machine-state file '$bad' ended up in the stage — aborting, nothing written." >&2
