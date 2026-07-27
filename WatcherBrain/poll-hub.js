@@ -22,6 +22,7 @@ const { BRAIN_DIR, readHubConfig, readCredential, postJson, getText } = require(
 const { applyPushedWhitelist, getReportableExtras } = require('./whitelist-merge');
 const { appendEvent, readAll, pruneByTime } = require('./event-log');
 const { readChosenPort } = require('./proxy-port');
+const { maybeRunSelfTest } = require('./self-test');
 
 const WHITELIST_PATH = path.join(BRAIN_DIR, '..', 'whitelist.txt');
 const VERSION_PATH = path.join(BRAIN_DIR, '..', 'VERSION');
@@ -37,6 +38,11 @@ const NET_STATE_PATH = path.join(BRAIN_DIR, 'net-state.txt');
 const DIAG_PENDING_PATH = path.join(BRAIN_DIR, 'diag-pending.flag');
 const LOCATION_PATH = path.join(BRAIN_DIR, 'location.json');
 const LOCATE_PENDING_PATH = path.join(BRAIN_DIR, 'locate-pending.flag');
+// Plan 0003 (Capa 4 staging gate): present = the hub marked this machine staging in a previous poll
+// response (is_staging, cross-repo contract). ONLY then does the poll run the acceptance self-test
+// suite — its cutover check spawns a real scratch proxy, so it must never run on a banca. Same
+// set-on-response / act-next-poll two-cycle idiom as diag-pending.flag.
+const STAGING_FLAG_PATH = path.join(BRAIN_DIR, 'staging.flag');
 const TAMPER_CURSOR_PATH = path.join(BRAIN_DIR, 'tamper-cursor.txt');
 const GET_LOCATION_PS = path.join(BRAIN_DIR, 'GetLocation.ps1');
 const EVENTS_LOG_PATH = path.join(BRAIN_DIR, 'events.log');
@@ -394,9 +400,14 @@ async function main() {
     logInternetTransition(internetReachable, proxyRunning);
     pruneByTime();
 
+    // Cross-repo contract (plan 0003): the RUNNING agent version, reported on every poll (additive — an
+    // old hub ignores it). Read once here; the OTA check below reuses it.
+    const localAgentVersion = readLocalAgentVersion();
+
     const body = {
         machine_id: cred.machine_id,
         credential: cred.credential,
+        agent_version: localAgentVersion,
         internet_reachable: internetReachable,
         proxy_running: proxyRunning,
         filter_active: filterActive,
@@ -428,6 +439,15 @@ async function main() {
         body.diagnostics = readAll(60000) || '(sin eventos registrados)';
     }
 
+    // Plan 0003 (Capa 4): ONLY a staging machine (staging.flag, set from a previous poll's is_staging)
+    // runs/reports the acceptance self-test suite. Cached once per running version; maybeRunSelfTest
+    // defers itself during updates/unplug and NEVER throws, so a broken suite can't take the poll loop
+    // down with it. Cheap on every later staging poll (it just re-reads the cached result).
+    if (fs.existsSync(STAGING_FLAG_PATH)) {
+        const selftest = await maybeRunSelfTest(localAgentVersion);
+        if (selftest) body.selftest = selftest;
+    }
+
     const response = await postJson(config.HubUrl, '/api/agent/poll', body);
 
     // Diagnostics handshake: clear the flag once uploaded; set it when asked.
@@ -441,6 +461,14 @@ async function main() {
     // Locate handshake: hub asks → force a fresh fix on the next poll.
     if (response.locate_requested) {
         try { fs.writeFileSync(LOCATE_PENDING_PATH, '', 'utf-8'); } catch (e) {}
+    }
+    // Staging handshake (plan 0003, cross-repo contract): the hub tells us whether this machine is
+    // staging. Only EXPLICIT booleans change local state — an older hub that omits the field leaves
+    // whatever we already knew untouched.
+    if (response.is_staging === true) {
+        try { fs.writeFileSync(STAGING_FLAG_PATH, '', 'utf-8'); } catch (e) {}
+    } else if (response.is_staging === false) {
+        try { if (fs.existsSync(STAGING_FLAG_PATH)) fs.unlinkSync(STAGING_FLAG_PATH); } catch (e) {}
     }
     // Tamper cursor advances ONLY after a successful post, so a failed poll
     // re-sends the events next time instead of dropping them.
@@ -460,7 +488,6 @@ async function main() {
         clearUnpluggedFlag();
     }
 
-    const localAgentVersion = readLocalAgentVersion();
     if (
         response.agent_version &&
         isNewerVersion(response.agent_version, localAgentVersion) &&

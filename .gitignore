@@ -31,4 +31,10 @@ WatcherBrain/update.log
 # poll-hub.js honors it). Runtime-only per-machine state — must never be committed
 # or shipped in the /descargar bundle (would block a fresh install's first update).
 WatcherBrain/update-failed.json
+# Plan 0003 staging gate — per-machine runtime state. CRITICAL that these never commit AND never ship:
+# the bundle's exclude mechanism is .gitignore-driven, and a stray staging.flag in a fresh install would
+# mark EVERY new machine as staging → running real cutover cycles on real bancas.
+WatcherBrain/staging.flag
+WatcherBrain/selftest-state.json
+WatcherBrain/selftest.lock
 WatcherBrain/_backup_*/
