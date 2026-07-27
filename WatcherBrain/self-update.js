@@ -13,12 +13,12 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { execFileSync } = require('child_process');
+const { execFileSync, spawn } = require('child_process');
 const net = require('net');
 
 const { BRAIN_DIR, downloadFile } = require('./hub-client');
 const { appendEvent } = require('./event-log');
-const { readChosenPort } = require('./proxy-port');
+const { readChosenPort, writeChosenPort, selectScaffoldPort, PORT_CANDIDATES } = require('./proxy-port');
 
 const ROOT_DIR = path.join(BRAIN_DIR, '..');
 const VERSION_PATH = path.join(ROOT_DIR, 'VERSION');
@@ -49,6 +49,12 @@ const LOCK_STALE_MS = 20 * 60 * 1000;
 // dead 127.0.0.1:8080 = internet fully down.
 const UPDATING_FLAG_PATH = path.join(BRAIN_DIR, 'updating.flag');
 
+// Nelson can mark a machine "unplugged" (intentionally unfiltered) from the
+// dashboard. The watchdog forces normal internet AND kills the proxy while this flag
+// exists (plan 0001), so a cutover would fight it — we defer the update, and never
+// force the proxy back on, while it's set.
+const UNPLUGGED_FLAG_PATH = path.join(BRAIN_DIR, 'unplugged.flag');
+
 // Post-update health is a GENEROUS CEILING, not a tight fit. waitForHealthy
 // EARLY-RETURNS the instant the port opens, so a healthy proxy costs only its real
 // startup time; this total only bounds how long we wait for a genuinely-dead version
@@ -61,10 +67,18 @@ const UPDATING_FLAG_PATH = path.join(BRAIN_DIR, 'updating.flag');
 // you grow this window, re-derive STALE_FLAG_MINUTES in the three .ps1 consumers.
 const HEALTH_POLL_MS = 3000;
 const PATIENT_HEALTH_RETRIES = 100; // ~300s ceiling (early-returns the instant the port opens)
-// The post-ROLLBACK health check stays SHORT: it gates nothing safety-critical
-// (fail-open holds regardless, and the watchdog brings the restored old proxy up),
-// so there's no reason to hold updating.flag for a second long window.
-const ROLLBACK_HEALTH_RETRIES = 5; // ~15s
+// Plan 0007 blue-green: returning to the home port after the scaffold cutover can
+// hit the OS still holding the just-freed port (TIME_WAIT) — a fresh proxy then
+// EADDRINUSE→exit(0)s. So the return-home step RE-SPAWNS on a cadence until it
+// binds, bounded by this ceiling. The scaffold proxy keeps filtering the whole
+// time, so there is no gap regardless of how long the home port takes to free.
+// BURST = health polls per spawn attempt before re-spawning.
+const HOME_REBIND_CEILING_MS = 300 * 1000; // ~5min, matches the patient health window
+const HOME_REBIND_BURST_RETRIES = 2;       // ~6s per spawn attempt
+// R4: after killing the old home proxy, wait this long for the OS to actually release
+// the port before trusting a listener there as "our new one". If it never frees (a
+// silently-failed kill / stuck old proxy), we adopt the live scaffold as home instead.
+const PORT_CLOSE_RETRIES = 20; // ~60s (× HEALTH_POLL_MS)
 
 // Failed-version cooldown marker. Written ONLY when a genuine update to a version
 // fails its post-update health check and we roll back (NOT on a pre-swap download/
@@ -126,6 +140,10 @@ async function downloadWithRetry(url, dest, timeoutMs, attempts, onEvent) {
 // own local whitelist extras, and anything log/state-like that isn't code.
 const PROTECTED_RELATIVE_PATHS = [
     'whitelist.txt',
+    // Plan 0008: the on-disk last-known-good whitelist. Per-machine safety-net state,
+    // written by the running proxy — an OTA must never overwrite it (it's what lets a
+    // cold boot with a bad live whitelist keep filtering).
+    'WatcherBrain/whitelist-lastgood.txt',
     'WatcherBrain/node',
     'WatcherBrain/HubConfig.json',
     'WatcherBrain/hub-credential.json',
@@ -138,6 +156,13 @@ const PROTECTED_RELATIVE_PATHS = [
     'WatcherBrain/poll-log-cursor.txt',
     'WatcherBrain/blocked-requests.log',
     'WatcherBrain/blocked-log-cleared-at.txt',
+    // Per-machine visit state written by the RUNNING proxy on every allowed
+    // request. Plan 0007 copies the new tree in while the old proxy is still live
+    // (to keep filtering with no gap), so — unlike 0006's stop-then-copy — these
+    // could be overwritten mid-write; protect them (they're machine state, never
+    // code, exactly like blocked-requests.log above).
+    'WatcherBrain/recent-visits.json',
+    'WatcherBrain/first-visit.json',
     'WatcherBrain/update.log',
     'WatcherBrain/_update',
     'WatcherBrain/machine-name.txt',
@@ -199,8 +224,11 @@ function overwriteFile(srcPath, destPath) {
     const data = fs.readFileSync(srcPath);
     const fd = fs.openSync(destPath, 'r+');
     try {
-        fs.ftruncateSync(fd, 0);
+        // Write-then-truncate (never truncate-first): an interrupted write then leaves
+        // the new content, or new+old-tail — never an empty file. See writeInPlace in
+        // whitelist-merge.js for why the empty window matters.
         fs.writeSync(fd, data, 0, data.length, 0);
+        fs.ftruncateSync(fd, data.length);
     } finally {
         fs.closeSync(fd);
     }
@@ -217,8 +245,9 @@ function writeFileInPlace(destPath, content) {
     const buf = Buffer.from(content, 'utf-8');
     const fd = fs.openSync(destPath, 'r+');
     try {
-        fs.ftruncateSync(fd, 0);
+        // Write-then-truncate (never leave the file momentarily empty).
         fs.writeSync(fd, buf, 0, buf.length, 0);
+        fs.ftruncateSync(fd, buf.length);
     } finally {
         fs.closeSync(fd);
     }
@@ -319,11 +348,179 @@ function checkTcpOpen(host, port, timeoutMs) {
     });
 }
 
-async function waitForHealthy(retries, delayMs) {
+// Poll until a proxy is listening on `port` (127.0.0.1), or `retries` are spent.
+// Takes an EXPLICIT port: plan 0007 waits for the scaffold port, then for the home
+// port — never the same one at once — so it must not read the persisted port itself.
+async function waitForHealthy(port, retries, delayMs) {
     for (let i = 0; i < retries; i++) {
-        if (await checkTcpOpen('127.0.0.1', readChosenPort(), 2000)) return true;
+        if (await checkTcpOpen('127.0.0.1', port, 2000)) return true;
         await new Promise((r) => setTimeout(r, delayMs));
     }
+    return false;
+}
+
+// Inverse of waitForHealthy: poll until NOTHING is listening on `port` (the just-killed
+// proxy actually released it), or retries are spent. R4: a silently-failed kill would
+// otherwise leave the OLD proxy listening, and waitForHealthy would accept it as our
+// freshly-spawned one — marking VERSION new while old code still runs.
+async function waitForPortClosed(port, retries, delayMs) {
+    for (let i = 0; i < retries; i++) {
+        if (!(await checkTcpOpen('127.0.0.1', port, 2000))) return true;
+        await new Promise((r) => setTimeout(r, delayMs));
+    }
+    return false;
+}
+
+// === Plan 0007 blue-green cutover helpers ===
+// Registry writes use reg.exe (NOT PowerShell), symmetric to flipToNormalInternet
+// above — same AMSI-avoidance reasoning (see that function's comment). During an
+// update self-update OWNS every registry write; the watchdog only reacts (it forces
+// normal internet if the port Windows points at goes dead — see
+// SetProxyByAvailability.ps1's updating-flag branch).
+function isUnplugged() {
+    // Nelson marked this machine intentionally unfiltered from the dashboard.
+    return fs.existsSync(UNPLUGGED_FLAG_PATH);
+}
+
+function setRegistryProxyOn(port) {
+    // Golden rule: only ever called AFTER a proxy is confirmed listening on `port`,
+    // so Windows never points at a dead proxy. Symmetric to flipToNormalInternet.
+    // NOTE (green-loop R0): this NO LONGER no-ops on unplug. A silent no-op here while
+    // the caller still went on to kill the home proxy left Windows pointing at a dead
+    // home port = fail-CLOSED. Unplug is now handled at the cutover DECISION points
+    // (abort before killing home; skip re-enable after a flip-to-normal) so we never
+    // kill a proxy Windows is still pointed at.
+    execFileSync('reg.exe', ['add', REG_KEY, '/v', 'ProxyServer', '/t', 'REG_SZ', '/d', `127.0.0.1:${port}`, '/f']);
+    execFileSync('reg.exe', ['add', REG_KEY, '/v', 'ProxyOverride', '/t', 'REG_SZ', '/d', '<local>', '/f']);
+    execFileSync('reg.exe', ['add', REG_KEY, '/v', 'ProxyEnable', '/t', 'REG_DWORD', '/d', '1', '/f']);
+}
+
+// The port Windows is CURRENTLY pointed at (ProxyServer = "127.0.0.1:NNNNN"), or null
+// if unset / not our loopback proxy. The registry is the source of truth for the live
+// proxy during a cutover, so the orphan sweep uses this to never kill the proxy Windows
+// is actively routing through. reg.exe query (no PowerShell) — same AMSI-avoidance as
+// flipToNormalInternet.
+function getRegistryProxyPort() {
+    try {
+        const out = execFileSync('reg.exe', ['query', REG_KEY, '/v', 'ProxyServer'], { encoding: 'utf-8' });
+        const m = out.match(/127\.0\.0\.1:(\d+)/);
+        if (m) return parseInt(m[1], 10);
+    } catch (_) { /* unset / no proxy configured */ }
+    return null;
+}
+
+// Spawn a proxy DIRECTLY (not via StartWatcher.vbs, which launches through wscript
+// detached and hides the node PID). detached + unref so the proxy OUTLIVES this
+// self-update process — essential for the home proxy, which must keep filtering
+// after we exit. process.execPath is the bundled node running this very script.
+// persist:false sets WATCHER_NO_PERSIST_PORT so the scaffold proxy never rewrites
+// proxy-port.txt (which must stay = home for the whole cutover).
+function spawnProxy(port, { persist }) {
+    const env = { ...process.env, WATCHER_OVERRIDE_PORT: String(port) };
+    if (!persist) env.WATCHER_NO_PERSIST_PORT = '1';
+    const child = spawn(process.execPath, ['proxy-server.js'], {
+        cwd: BRAIN_DIR, env, detached: true, stdio: 'ignore'
+    });
+    // A spawn-level 'error' (e.g. execPath vanished) would otherwise be an unhandled
+    // 'error' event → uncaughtException. Swallow it — waitForHealthy is the real signal.
+    child.on('error', () => {});
+    child.unref();
+    return child;
+}
+
+// Kill ONLY our proxy-server.js instance listening on `port` — scoped by BOTH the
+// listening port AND the command line, so the same-port degrade can never
+// collaterally kill the scaffold proxy, and the pool sweep can never kill a
+// non-watcher process that transiently holds a pool port. Best-effort.
+function killListenerOnPort(port) {
+    // netstat (NOT Get-NetTCPConnection, which is Win8+/Server2012+ only — this matches
+    // the watchdog's Get-CimInstance compat floor) → the PID owning the LISTEN on this
+    // port; then scope to OUR proxy-server.js by command line so we never kill a
+    // collateral process. Every literal is single-quoted (no inner double-quotes) to
+    // dodge the nested cmd/PowerShell quoting hazard this file documents at flipToNormal.
+    // Best-effort: a missing/already-dead listener, or a swallowed error, is fine.
+    const ps =
+        `$ErrorActionPreference='SilentlyContinue';` +
+        `netstat -ano | ForEach-Object {` +
+        ` $f = $_ -split '\\s+' | Where-Object { $_ };` +
+        ` if ($f.Length -ge 5 -and $f[3] -eq 'LISTENING' -and $f[1] -like '*:${port}') {` +
+        ` $procId = $f[4];` +
+        ` $p = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $procId);` +
+        ` if ($p -and $p.CommandLine -like '*proxy-server.js*') { Stop-Process -Id $procId -Force } } }`;
+    try {
+        execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', ps], { stdio: 'ignore' });
+    } catch (e) { /* best effort — a missing/already-dead listener is fine */ }
+}
+
+// Retire any of OUR proxies left listening on a NON-home pool port — an orphan a
+// prior crashed/power-lost cutover may have stranded on a scaffold port. Scoped by
+// killListenerOnPort to our proxy only, and never touches the home port. Run at the
+// start of an update and again in finally, so a scaffold node never accumulates
+// between updates.
+function sweepScaffoldOrphans(homePort) {
+    // Registry-aware defense (green-loop #1): never kill the proxy Windows is actively
+    // routing filter traffic through, even if proxy-port.txt somehow disagrees (e.g. a
+    // home-rebind-deferred adopt whose writeChosenPort failed). Killing it = fail-closed.
+    const livePort = getRegistryProxyPort();
+    for (const p of PORT_CANDIDATES) {
+        if (p === homePort || p === livePort) continue;
+        killListenerOnPort(p);
+    }
+}
+
+// Return to the home port after the scaffold cutover. The just-freed home port may
+// be briefly OS-held (TIME_WAIT), so a fresh proxy EADDRINUSE→exit(0)s; re-spawn on
+// a cadence until it binds, bounded by the ceiling. The scaffold keeps filtering the
+// WHOLE time, so there is no gap however long this takes. Heartbeats updating.flag
+// each loop so the watchdog's 15-min stale guard measures THIS phase on its own
+// clock, not the sum of both health windows.
+async function respawnHomeUntilHealthy(homePort) {
+    const deadline = Date.now() + HOME_REBIND_CEILING_MS;
+    // Only (re)spawn when we DON'T already have a live child starting up. A node
+    // that EADDRINUSE→exit(0)s (the port is briefly OS-held) flips childExited, so
+    // the next loop re-spawns; a node still cold-starting stays, so a slow second
+    // start does NOT trigger a spawn storm — we just keep waiting on the one child.
+    let childExited = true;
+    while (Date.now() < deadline) {
+        if (childExited) {
+            childExited = false;
+            const child = spawnProxy(homePort, { persist: true });
+            child.once('exit', () => { childExited = true; });
+        }
+        if (await waitForHealthy(homePort, HOME_REBIND_BURST_RETRIES, HEALTH_POLL_MS)) return true;
+        try { fs.writeFileSync(UPDATING_FLAG_PATH, new Date().toISOString(), 'utf-8'); } catch (e) {}
+    }
+    return false;
+}
+
+// AC4 degrade: no scaffold port was free, so fall back to the 0006 same-port
+// kill-and-rebind. This has a real (fail-OPEN) gap like 0006 but converges and
+// never fails closed. The new files are already copied by main(); VERSION is still
+// the old one. self-update sets PE here itself (the watchdog no longer re-enables
+// during the flag). Returns true on success, false after a rollback to the old one.
+async function sameportCutover(homePort, argVersion, localVersion, backupDir) {
+    flipToNormalInternet();            // fail-open FIRST (golden rule), then kill
+    killListenerOnPort(homePort);
+    if (await respawnHomeUntilHealthy(homePort)) {
+        // R0: if an unplug landed, leave normal internet (from the flip above) — don't
+        // re-enable the proxy against an explicit unplug. Safe either way (already PE=0).
+        if (!isUnplugged()) setRegistryProxyOn(homePort);  // new proxy healthy → point Windows at it
+        writeFileInPlace(VERSION_PATH, argVersion);
+        log(`Same-port degrade update to ${argVersion} successful and healthy.`);
+        appendEvent('update-ok', `${localVersion} -> ${argVersion} (same-port degrade)`);
+        return true;
+    }
+    // The new version never came up on the home port — roll back to the old one.
+    log('Same-port degrade: new version did not come up — rolling back.');
+    killListenerOnPort(homePort);
+    restoreBackup(backupDir);
+    writeFileInPlace(VERSION_PATH, localVersion);
+    recordFailedVersion(argVersion);
+    const restored = await respawnHomeUntilHealthy(homePort);
+    if (restored && !isUnplugged()) setRegistryProxyOn(homePort);
+    log(restored
+        ? 'Rollback successful, previous version restored and healthy.'
+        : 'Rollback not confirmed healthy — watchdog will keep retrying; fail-open holds.');
     return false;
 }
 
@@ -394,6 +591,17 @@ async function main() {
         return;
     }
 
+    // Don't run a cutover into an intentional unplug: while unplugged.flag exists the
+    // watchdog forces normal internet + kills the proxy, which would fight the
+    // cutover. Defer — the next poll re-triggers once the machine resumes. (An unplug
+    // that lands MID-update instead is caught by the setRegistryProxyOn guard + the
+    // health checks failing into a safe fail-open rollback.)
+    if (fs.existsSync(UNPLUGGED_FLAG_PATH)) {
+        log('Machine is unplugged (dashboard) — deferring the update until it resumes.');
+        releaseLock();
+        return;
+    }
+
     log(`Update available (from hub): ${localVersion} -> ${argVersion}`);
 
     // Fresh workspace inside the Defender-excluded folder.
@@ -439,61 +647,126 @@ async function main() {
             `Expand-Archive -Path '${tempZip}' -DestinationPath '${tempExtract}' -Force`
         ]);
 
-        // GOLDEN RULE: normal internet before the proxy is touched. Raise the
-        // updating flag FIRST (before the flip) so every watchdog layer forces
-        // normal internet and keeps its hands off the proxy for the whole swap.
-        // Without it, the watchdog re-enables the proxy the moment it sees it
-        // still listening, then we kill it for the copy and Windows is left
-        // pointing at a dead proxy. Cleared in finally.
-        fs.writeFileSync(UPDATING_FLAG_PATH, new Date().toISOString(), 'utf-8');
-        flipToNormalInternet();
-        stopProxyAndWatchdog();
+        // === Plan 0007 — blue-green zero-gap cutover ===
+        // The filter must never blink off. Rather than kill the old proxy on the
+        // home port and cold-start the new one there (0006's ~60-90s dark gap), bring
+        // the new proxy up on a scaffold port while the OLD keeps filtering on the
+        // home port, switch Windows to the scaffold only once it is listening, kill
+        // the old proxy, return to the now-free home, switch Windows back, and retire
+        // the scaffold. Two proxies are alive ONLY inside this bounded,
+        // updating.flag-gated window — the "one port ⇒ one proxy" relaxation captured
+        // in ADR 0001.
+        const homePort = readChosenPort();
 
-        // The hub bundle has files at the extract root (no wrapper folder). From
-        // here on the install is being mutated — any failure past this point must
-        // trigger the rollback in the catch (swapStarted gates that).
+        // Clear a scaffold-port orphan a prior crashed/power-lost cutover may have
+        // stranded (belt-and-suspenders; the finally sweep is the primary). Scoped to
+        // our proxy only — never the home port, never a non-watcher process.
+        sweepScaffoldOrphans(homePort);
+
+        // Copy the new tree in FIRST, while the OLD proxy is still filtering on the
+        // home port. Node loaded its code at startup, so overwriting the files on
+        // disk does not disturb the running old proxy — it keeps serving from memory.
+        // From here the install is mutated: a failure now must restore the backup
+        // (swapStarted gates the catch's rollback). VERSION is written LATE (only once
+        // the home cutover is confirmed) so the fleet never sees the new version while
+        // the machine still runs old code.
+        // Raise the flag BEFORE the first install mutation so the watchdog is gated
+        // for the WHOLE copy: it hands off the proxy LIFECYCLE (no start/kill) and
+        // enforces the golden rule REACTIVELY (reads the port Windows points at,
+        // forces normal internet only if it's dead). Without this, a proxy crash
+        // during the copy could let the ungated watchdog launch a proxy from a
+        // half-copied tree. self-update owns every registry write below.
+        fs.writeFileSync(UPDATING_FLAG_PATH, new Date().toISOString(), 'utf-8');
+
         swapStarted = true;
         copyTree(tempExtract, ROOT_DIR, '');
-        writeFileInPlace(VERSION_PATH, argVersion); // hub is authoritative
-        log('New files copied in.');
+        log('New files copied in (old proxy still filtering on the home port).');
 
-        startProxyAndWatchdog();
-
-        // Patient CEILING: a slow-but-fine proxy (cold-start ~60-90s under Defender)
-        // must not be rolled back. waitForHealthy returns the instant the port opens,
-        // so this only bounds the wait for a genuinely-dead version.
-        const healthy = await waitForHealthy(PATIENT_HEALTH_RETRIES, HEALTH_POLL_MS);
-        if (!healthy) {
-            // The new version did not come up healthy within the generous ceiling —
-            // treat it as genuinely bad and roll back to the previous (filtering) one.
-            log('Post-update health check FAILED — rolling back.');
-            stopProxyAndWatchdog();
-            restoreBackup(backupDir);
-            writeFileInPlace(VERSION_PATH, localVersion);
-            // Record the FAILED TARGET (argVersion, never localVersion) so poll-hub
-            // won't re-trigger the same version every 2-min poll. Written AFTER
-            // restoreBackup so the restore can't resurrect a stale marker over it.
-            recordFailedVersion(argVersion);
-            startProxyAndWatchdog();
-            // Hand the proxy back to the watchdog now: clearing the flag here lets the
-            // next watchdog tick restore filtering (PE=1) on the old proxy ASAP instead
-            // of waiting out a second window. (finally unlinks it again — idempotent.)
-            try { fs.unlinkSync(UPDATING_FLAG_PATH); } catch (e) {}
-            // SHORT confirmation only — gates nothing safety-critical (fail-open holds;
-            // the watchdog brings the restored old proxy up regardless).
-            const rolledBackHealthy = await waitForHealthy(ROLLBACK_HEALTH_RETRIES, HEALTH_POLL_MS);
-            log(
-                rolledBackHealthy
-                    ? 'Rollback successful, previous version restored and healthy.'
-                    : 'Rollback not confirmed healthy yet — watchdog will keep retrying; fail-open holds regardless.'
-            );
-            if (rolledBackHealthy) {
+        const scaffoldPort = await selectScaffoldPort(homePort);
+        if (scaffoldPort === null) {
+            // AC4: no scaffold port free (rare) — degrade to the 0006 same-port path.
+            if (await sameportCutover(homePort, argVersion, localVersion, backupDir)) {
+                clearFailedVersion();
                 pruneOldBackups(MAX_BACKUPS_TO_KEEP);
             }
             return;
         }
 
-        log(`Update to ${argVersion} successful and healthy.`);
+        // --- Phase 1: bring the NEW proxy up on the scaffold port (old proxy still
+        // filtering the home port). This VALIDATES the new version BEFORE any cutover. ---
+        log(`Starting new proxy on scaffold port ${scaffoldPort} (home ${homePort} still filtering).`);
+        spawnProxy(scaffoldPort, { persist: false });
+        const bHealthy = await waitForHealthy(scaffoldPort, PATIENT_HEALTH_RETRIES, HEALTH_POLL_MS);
+        if (!bHealthy) {
+            // The new version never came up on the scaffold port. The OLD proxy on the
+            // home port was NEVER stopped — it is still filtering. ZERO disruption.
+            // Restore the old files (so disk matches the running old proxy), mark the
+            // version failed, done. Strictly better than 0006, which had to kill first
+            // and only THEN discover the version was bad.
+            log('New version did not come up on the scaffold port — rolling back with ZERO disruption (old proxy never stopped).');
+            killListenerOnPort(scaffoldPort);
+            restoreBackup(backupDir);
+            recordFailedVersion(argVersion);
+            return;
+        }
+
+        // R0 — unplug abort: if Nelson marked this machine unfiltered while we were
+        // validating the scaffold, do NOT cut over or kill the home proxy (that would
+        // strand Windows on a soon-to-be-killed home port = fail-CLOSED). Leave the old
+        // proxy filtering on home, retire the scaffold, and let the watchdog apply the
+        // unplug (normal internet). The update re-triggers once the machine resumes.
+        if (isUnplugged()) {
+            log('Unplugged mid-update — aborting the cutover before touching the home proxy (old proxy left running).');
+            killListenerOnPort(scaffoldPort);
+            restoreBackup(backupDir);
+            return;
+        }
+
+        // --- Cutover to the scaffold: point Windows at the new proxy. BOTH proxies
+        // are live at this instant, so the flip is gap-free. Golden rule: we point at
+        // the scaffold only AFTER it is confirmed listening. Then kill the old proxy
+        // on the home port (scoped to our proxy on that port — never the scaffold). ---
+        setRegistryProxyOn(scaffoldPort);
+        log(`Windows switched to new proxy on ${scaffoldPort}; killing old proxy on home ${homePort}.`);
+        killListenerOnPort(homePort);
+
+        // --- Phase 2: return to the fixed home. Heartbeat first so the stale guard
+        // measures this second start on its own clock. R4: CONFIRM the old proxy
+        // actually released the home port before trusting a listener there — a
+        // silently-failed kill would otherwise let waitForHealthy accept the OLD proxy
+        // as our freshly-spawned one (VERSION marked new while old code still runs).
+        // respawnHomeUntilHealthy then keeps re-spawning while the freed port is OS-held;
+        // the scaffold keeps filtering the whole time, so there is no gap. ---
+        fs.writeFileSync(UPDATING_FLAG_PATH, new Date().toISOString(), 'utf-8');
+        log(`Returning to the home port ${homePort}.`);
+        const homeFreed = await waitForPortClosed(homePort, PORT_CLOSE_RETRIES, HEALTH_POLL_MS);
+        if (!homeFreed) {
+            log(`Home port ${homePort} did not free after the kill (old proxy may be stuck) — adopting the live scaffold as home instead of risking a false health pass.`);
+        }
+        const homeHealthy = homeFreed && await respawnHomeUntilHealthy(homePort);
+        if (!homeHealthy) {
+            // Home didn't free (stuck old proxy), OR didn't rebind within the ceiling.
+            // Either way Windows still points at the LIVE scaffold (new code), so there
+            // is NO gap. AC1 (never drop the filter) outranks AC2 (no drift): adopt the
+            // scaffold as the home so the watchdog keeps filtering through it after the
+            // flag clears, record the new VERSION (the new code IS running on the
+            // scaffold), and re-home on the next update. Do NOT tear down the live
+            // filter to chase the home port.
+            writeChosenPort(scaffoldPort);
+            writeFileInPlace(VERSION_PATH, argVersion);
+            log(`Home port did not come back; keeping the filter live on scaffold ${scaffoldPort} and adopting it as home (will re-home next update).`);
+            appendEvent('update-ok', `${localVersion} -> ${argVersion} (home-rebind deferred; filtering on ${scaffoldPort})`);
+            clearFailedVersion();
+            pruneOldBackups(MAX_BACKUPS_TO_KEEP);
+            return;
+        }
+
+        // --- Cutover back to the home port (both live → gap-free), retire the
+        // scaffold, and only NOW record the new version. ---
+        setRegistryProxyOn(homePort);
+        killListenerOnPort(scaffoldPort);
+        writeFileInPlace(VERSION_PATH, argVersion); // hub authoritative; home cutover confirmed
+        log(`Update to ${argVersion} successful and healthy — back home on ${homePort}, scaffold retired.`);
         appendEvent('update-ok', `${localVersion} -> ${argVersion}`);
         clearFailedVersion(); // success → drop any stale failed-version marker
         pruneOldBackups(MAX_BACKUPS_TO_KEEP);
@@ -501,17 +774,20 @@ async function main() {
         appendEvent('update-failed', `${argVersion}: ${describeError(e)}`);
         if (!swapStarted) {
             // Failure BEFORE the install was touched (download / checksum / extract to
-            // temp). The OLD proxy is untouched and still filtering (ProxyEnable=1) —
-            // do NOT tear it down for a transient infra blip (e.g. Supabase/CDN hiccup);
-            // that would drop a healthy machine to a ~60-90s cold-start for nothing.
-            // (If the error landed between the flip and the swap, the old proxy is
-            // already stopped and the updating flag is up = fail-open; the watchdog
-            // restarts the intact old code once finally clears the flag.) No cooldown
-            // marker either — the version is not at fault.
+            // the temp dir). The OLD proxy was never stopped — it is still filtering on
+            // the home port (blue-green touches nothing until the copy). Do NOT tear it
+            // down for a transient infra blip (e.g. Supabase/CDN hiccup); that would
+            // drop a healthy machine for nothing. No cooldown marker either — the
+            // version is not at fault.
             log(`Update aborted before touching the install (no rollback needed): ${describeError(e)}`);
         } else {
-            log(`Update failed mid-swap, rolling back: ${describeError(e)}`);
+            // A throw somewhere in the cutover. Fail-open FIRST (golden rule), then
+            // big-hammer recover: stop BOTH proxies (StopWatcherProcesses kills every
+            // proxy-server.js — killing the home and any scaffold instance is correct
+            // here), restore the old files, and hand the proxy back to the watchdog.
+            log(`Update failed mid-cutover, rolling back: ${describeError(e)}`);
             try {
+                flipToNormalInternet();
                 stopProxyAndWatchdog();
                 restoreBackup(backupDir);
                 writeFileInPlace(VERSION_PATH, localVersion);
@@ -521,10 +797,16 @@ async function main() {
             }
         }
     } finally {
-        // Cleared only now — the proxy is healthy again (or rollback restored
-        // it / left it down = fail-open). Dropping the flag lets the next
-        // watchdog cycle restore filtering (PE=1) if the proxy is up.
+        // Cleared only now — the proxy is healthy again (or rollback restored it /
+        // left it fail-open). Dropping the flag lets the next watchdog cycle resume
+        // normal maintenance.
         try { fs.unlinkSync(UPDATING_FLAG_PATH); } catch (e) {}
+        // Zero-zombie guarantee: retire any scaffold-port proxy still lingering
+        // (scoped to a non-home pool port, our proxy only), so nothing accumulates
+        // between updates. Reads the current home from proxy-port.txt, so if a
+        // home-rebind-deferred degrade adopted the scaffold as home, that live proxy
+        // is skipped.
+        try { sweepScaffoldOrphans(readChosenPort()); } catch (e) {}
         try { fs.rmSync(UPDATE_DIR, { recursive: true, force: true }); } catch (e) {}
         releaseLock();
     }
@@ -542,10 +824,15 @@ async function main() {
 // nothing to diagnose from.
 process.on('uncaughtException', (e) => {
     log(`FATAL uncaughtException: ${e && e.stack ? e.stack : e}`);
+    // Golden rule on a fatal mid-cutover death: best-effort fail-open so we never
+    // leave Windows pointing at a proxy we were about to move or kill. (A power loss
+    // can't run this — that residual micro-window is documented in ADR 0001.)
+    try { flipToNormalInternet(); } catch (_) {}
     process.exit(1);
 });
 process.on('unhandledRejection', (e) => {
     log(`FATAL unhandledRejection: ${e && e.stack ? e.stack : e}`);
+    try { flipToNormalInternet(); } catch (_) {}
     process.exit(1);
 });
 process.on('exit', (code) => {

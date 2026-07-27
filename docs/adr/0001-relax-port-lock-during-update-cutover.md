@@ -57,3 +57,37 @@ cutover de un update**, bajo estas condiciones (todas obligatorias):
 **Reversibilidad**
 - Si en HW el cutover resulta frágil, se degrada permanentemente al modelo mismo-puerto de 0006 **sin
   perder seguridad** (la golden rule fail-open se sostiene igual). La decisión no es irreversible.
+
+## Actualización tras el green-loop (2026-07-25) — mecanismo convergido + micro-ventana aceptada
+
+El green-loop (crítico adversario separado, 2 rondas) refinó el mecanismo. Se registra aquí sin alterar la
+decisión de arriba; son las consecuencias exactas de implementarla.
+
+- **Fuente de verdad del puerto vivo = el registro `ProxyServer`, no `proxy-port.txt`.** El boceto original
+  hablaba de `proxy-port.txt` mutable en runtime; el diseño convergió a algo más simple y seguro: durante
+  el cutover `proxy-port.txt` **se queda = hogar**, self-update escribe el **registro**
+  (`ProxyServer=127.0.0.1:<puerto vivo>`, siempre DESPUÉS de que ese puerto escuche), y el watchdog, con el
+  flag arriba, cede el ciclo de vida pero aplica el golden-rule **reactivamente contra el puerto del
+  registro**: vivo → no toca; muerto → internet normal (fail-open). El registro es atómico y sobrevive al
+  reboot, así que no hay archivo extra que mantener en sincronía. Única excepción: el degrade
+  "home-rebind diferido" (rarísimo) adopta el andamio como hogar escribiendo `proxy-port.txt` — prioriza
+  AC1 "nunca sin filtro" sobre AC2 "sin drift", y se re-homea en el próximo update.
+- **Kill selectivo por dueño-del-puerto, no `StopWatcherProcesses`.** El proxy se lanza vía VBS detached
+  (self-update no ve el PID del node), así que self-update **spawnnea directo** (`process.execPath`,
+  `detached+unref`) y mata por **dueño del puerto** filtrado a nuestro `proxy-server.js` — nunca colateral
+  al andamio ni a un proceso ajeno.
+- **Capas gateadas = las 4 que spawnnean/escriben-registro.** El crítico verificó que WatchdogLoop,
+  CheckAndStartProxy, SetProxyByAvailability y **StartProxyAtLogon.bat** (a la que se le agregó el gate vía
+  `IsUpdating.ps1`, stale-guarded 15 min) cubren el 100% de los disparadores. SupervisorService solo
+  re-arma la tarea del watchdog (no toca proxy ni registro) → no necesita gate.
+- **R1 — micro-ventana fail-CLOSED aceptada (irreducible).** En el instante feliz del cutover el registro
+  tiene `PE=1→andamio`. Un **corte de luz / reboot exactamente ahí** deja, al volver, Windows apuntando a un
+  puerto muerto por **~1 tick del watchdog (5–15s)** hasta que la regla reactiva fuerza internet normal. Es
+  **irreducible para cualquier diseño zero-gap** (no se puede hacer el write del registro atómico con un
+  apagón físico) y es la contracara de cerrar el hueco fail-OPEN garantizado de ~60–90s de 0006. Se acepta.
+  Mitigación incluida: el watchdog corre su chequeo **antes** del `Start-Sleep` (corrección casi inmediata
+  al reiniciar), y los crash-handlers de self-update hacen flip-to-normal best-effort en una muerte
+  no-apagón. **Aprobado por Felix 2026-07-25.**
+- **R5 — `recent-visits.json` / `first-visit.json` protegidos.** La copia temprana del árbol (con el proxy
+  viejo aún leyéndolos/escribiéndolos) los sumó a `PROTECTED_RELATIVE_PATHS` en self-update.js, para que un
+  update nunca los pise a media escritura.

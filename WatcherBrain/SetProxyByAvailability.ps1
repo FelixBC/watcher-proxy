@@ -33,11 +33,14 @@ $pf = Join-Path $BrainDir 'proxy-port.txt'
 if (Test-Path $pf) { $v = (Get-Content $pf -Raw -ErrorAction SilentlyContinue).Trim(); if ($v -match '^\d+$') { $ProxyPort = [int]$v } }
 
 # Use 2s timeout; TcpClient.Connect() with no timeout blocks ~21s when nothing is listening (Windows TCP retransmits).
-function Test-ProxyListening {
+# Param'd (plan 0007): the reactive updating-flag branch below probes the port
+# Windows is CURRENTLY pointed at, which during a cutover may be the scaffold port,
+# not the persisted home port. Defaults to the home port for the normal path.
+function Test-PortListening([int]$port = $ProxyPort) {
     $timeoutMs = 2000
     try {
         $tcp = New-Object Net.Sockets.TcpClient
-        $ar = $tcp.BeginConnect('127.0.0.1', $ProxyPort, $null, $null)
+        $ar = $tcp.BeginConnect('127.0.0.1', $port, $null, $null)
         if ($ar.AsyncWaitHandle.WaitOne($timeoutMs, $false) -and $tcp.Connected) {
             $tcp.EndConnect($ar)
             $tcp.Close()
@@ -47,17 +50,50 @@ function Test-ProxyListening {
     } catch { }
     return $false
 }
+function Test-ProxyListening { return (Test-PortListening $ProxyPort) }
+
+$RegKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
+
+# The port Windows is CURRENTLY pointed at (ProxyServer = "127.0.0.1:NNNNN"), or
+# $null if unset / not our loopback proxy. Plan 0007: this registry value — NOT
+# proxy-port.txt — is the source of truth for "which proxy is live" during a cutover
+# (it's atomic and survives a reboot, unlike a port file we'd have to keep in sync).
+function Get-RegistryProxyPort {
+    try {
+        $ps = (Get-ItemProperty -Path $RegKey -Name ProxyServer -ErrorAction SilentlyContinue).ProxyServer
+        if ($ps -and $ps -match '^127\.0\.0\.1:(\d+)$') { return [int]$matches[1] }
+    } catch { }
+    return $null
+}
+
+# PLAN 0007 — reactive golden rule during a blue-green update cutover.
+# While updating.flag is up, self-update.js OWNS the registry: it points Windows at
+# the scaffold port, then back at the home port, and ALWAYS only after that port is
+# listening. So we must NOT rewrite ProxyServer from proxy-port.txt here — that would
+# fight the flip (e.g. re-point at the home port while the live proxy is on the
+# scaffold). Instead enforce the golden rule REACTIVELY against the port Windows is
+# actually pointed at: if a live proxy is there, hands off entirely; if it's DEAD (a
+# crash or power-loss/reboot froze ProxyEnable=1 on a port that's now gone), force
+# NORMAL internet (fail-open) in this one tick. This is what lets zero-gap (live
+# pointer left alone) and fail-open (dead pointer corrected) coexist. See ADR 0001.
+if (Test-UpdatingActive $UpdatingFlag) {
+    $regPort = Get-RegistryProxyPort
+    if ($null -ne $regPort -and (Test-PortListening $regPort)) {
+        exit 0   # live pointer — leave the registry exactly as self-update set it
+    }
+    # Dead/unset pointer mid-update → force normal internet (fail-open).
+    Set-ItemProperty -Path $RegKey -Name ProxyEnable -Value 0 -Type DWord -ErrorAction SilentlyContinue
+    Remove-ItemProperty -Path $RegKey -Name ProxyServer -ErrorAction SilentlyContinue
+    Remove-ItemProperty -Path $RegKey -Name ProxyOverride -ErrorAction SilentlyContinue
+    try {
+        $k = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings\Connections'
+        $d = (Get-ItemProperty -Path $k -Name DefaultConnectionSettings -ErrorAction SilentlyContinue).DefaultConnectionSettings
+        if ($d -and $d.Length -gt 8) { $d[8] = 9; Set-ItemProperty -Path $k -Name DefaultConnectionSettings -Value $d }
+    } catch {}
+    exit 0
+}
 
 $proxyUp = Test-ProxyListening
-
-# GOLDEN RULE: during a self-update the proxy is deliberately torn down and
-# rebuilt. If it happens to still be listening at this instant we must NOT
-# re-point Windows at it (PE=1) — self-update is about to kill it for the file
-# swap, which would leave traffic routed at a dead 127.0.0.1:8080 = internet
-# FULLY DOWN. Treat "updating" as proxy-down so this always forces NORMAL
-# internet (fail-open); self-update.js clears the flag once the proxy is
-# healthy again, and the next cycle restores filtering.
-if (Test-UpdatingActive $UpdatingFlag) { $proxyUp = $false }
 
 if ($proxyUp) {
     # Proxy is running: ensure proxy is ON (restriction active)

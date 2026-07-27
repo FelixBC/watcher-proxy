@@ -22,7 +22,13 @@ process.on('unhandledRejection', (e) => {
 // Configuration
 const CONFIG = {
     // Obscure port chosen at install (proxy-port.txt), NOT 8080 — see proxy-port.js.
-    PORT: readChosenPort(),
+    // Plan-0007 scaffold mode: self-update spawns a SECOND proxy instance on a
+    // scaffold port by setting WATCHER_OVERRIDE_PORT in its env; that instance
+    // must NOT read/bind the persisted home port, so the override wins here.
+    PORT: (() => {
+        const override = parseInt(process.env.WATCHER_OVERRIDE_PORT, 10);
+        return (Number.isInteger(override) && override > 0 && override < 65536) ? override : readChosenPort();
+    })(),
     // Whitelist is in parent directory (one level up from WatcherBrain)
     WHITELIST_FILE: path.join(__dirname, '..', 'whitelist.txt'),
     LOG_FILE: path.join(__dirname, 'blocked-requests.log'),
@@ -35,6 +41,10 @@ const CONFIG = {
     VISITS_FILE: path.join(__dirname, 'recent-visits.json'),
     // First ALLOWED page opened each day (its "first page after the session").
     FIRST_VISIT_FILE: path.join(__dirname, 'first-visit.json'),
+    // PLAN 0008: on-disk copy of the last VALID whitelist. Survives a reboot/power-loss
+    // so a cold start with an empty/corrupt live whitelist can fall back to it and keep
+    // filtering, instead of failing open. Protected from OTA overwrite (self-update.js).
+    LASTGOOD_FILE: path.join(__dirname, 'whitelist-lastgood.txt'),
     ERROR_PAGE: path.join(__dirname, 'error-page.html')
 };
 
@@ -53,59 +63,120 @@ let whitelist = {
     exactUrls: new Set()
 };
 
-// Load and parse whitelist
-function loadWhitelist() {
+// Filter mode: 'filtering' (enforce the whitelist) or 'failopen' (allow ALL).
+// PLAN 0008 / golden rule: the catastrophe is NO INTERNET, not "no filter". If the
+// whitelist is unusable AND there is no last-known-good anywhere, we must NOT block
+// every site (that makes the banca unable to work) — we FAIL OPEN (let everything
+// through) so internet is never lost. Filtering resumes automatically when a valid
+// whitelist returns; the state is logged so the fleet can see a machine is unfiltered.
+let filterMode = 'filtering';
+
+// Parse whitelist text into a {domains, exactUrls} pair. Pure, no side effects.
+function parseWhitelistContent(content) {
+    const domains = new Set();
+    const exactUrls = new Set();
+    for (let line of content.split('\n')) {
+        line = line.split('#')[0].trim();
+        if (!line) continue;
+        if (line.startsWith('http://') || line.startsWith('https://')) {
+            exactUrls.add(line.toLowerCase());
+        } else {
+            domains.add(line.toLowerCase().replace(/^https?:\/\//, '').split('/')[0]);
+        }
+    }
+    return { domains, exactUrls };
+}
+
+// Read + parse a whitelist file → {content, domains, exactUrls}, or null if the file is
+// missing/unreadable.
+function readWhitelistFile(filePath) {
     try {
-        if (!fs.existsSync(CONFIG.WHITELIST_FILE)) {
-            console.warn(`Warning: Whitelist file not found at ${CONFIG.WHITELIST_FILE}`);
-            console.warn('Creating default whitelist.txt file...');
-            createDefaultWhitelist();
-            return;
-        }
-
-        const content = fs.readFileSync(CONFIG.WHITELIST_FILE, 'utf-8');
-        const lines = content.split('\n');
-        
-        whitelist.domains.clear();
-        whitelist.exactUrls.clear();
-
-        for (let line of lines) {
-            // Remove comments and trim
-            line = line.split('#')[0].trim();
-            
-            if (!line) continue;
-
-            // Check if it's an exact URL (starts with http:// or https://)
-            if (line.startsWith('http://') || line.startsWith('https://')) {
-                whitelist.exactUrls.add(line.toLowerCase());
-            } else {
-                // It's a domain - normalize it
-                const domain = line.toLowerCase().replace(/^https?:\/\//, '').split('/')[0];
-                whitelist.domains.add(domain);
-            }
-        }
-
-        console.log(`Loaded ${whitelist.domains.size} domains and ${whitelist.exactUrls.size} exact URLs from whitelist`);
-    } catch (error) {
-        console.error(`Error loading whitelist: ${error.message}`);
-        console.error('Continuing with empty whitelist (all requests will be blocked)');
+        if (!fs.existsSync(filePath)) return null;
+        const content = fs.readFileSync(filePath, 'utf-8');
+        const parsed = parseWhitelistContent(content);
+        return { content, domains: parsed.domains, exactUrls: parsed.exactUrls };
+    } catch (e) {
+        return null;
     }
 }
 
-function createDefaultWhitelist() {
-    const defaultContent = `# URL Whitelist Configuration
-# Add one URL or domain per line
-# Lines starting with # are comments
-# 
-# Examples:
-# google.com          (allows all Google subdomains)
-# youtube.com         (allows all YouTube subdomains)
-# https://github.com/specific-repo  (allows only this exact URL)
+function isUsable(parsed) {
+    return !!parsed && (parsed.domains.size > 0 || parsed.exactUrls.size > 0);
+}
 
-# Add your allowed domains/URLs below:
-`;
-    fs.writeFileSync(CONFIG.WHITELIST_FILE, defaultContent, 'utf-8');
-    console.log('Created default whitelist.txt file');
+// Hidden+System-safe, write-then-truncate (never momentarily empty) — same durability
+// idiom as whitelist-merge.js. Best-effort: the sidecar is a safety net, never break
+// the proxy over it.
+function writeFileSafe(filePath, content) {
+    try {
+        const buf = Buffer.from(content, 'utf-8');
+        if (!fs.existsSync(filePath)) {
+            fs.writeFileSync(filePath, buf);
+            return;
+        }
+        const fd = fs.openSync(filePath, 'r+');
+        try {
+            fs.writeSync(fd, buf, 0, buf.length, 0);
+            fs.ftruncateSync(fd, buf.length);
+        } finally {
+            fs.closeSync(fd);
+        }
+    } catch (e) { /* best effort */ }
+}
+
+// Persist the current valid whitelist as the on-disk last-known-good, if changed — so a
+// cold boot with an empty/corrupt live whitelist falls back to it and RESUMES FILTERING.
+function persistLastGood(content) {
+    try {
+        const cur = fs.existsSync(CONFIG.LASTGOOD_FILE) ? fs.readFileSync(CONFIG.LASTGOOD_FILE, 'utf-8') : null;
+        if (cur !== content) writeFileSafe(CONFIG.LASTGOOD_FILE, content);
+    } catch (e) { /* best effort */ }
+}
+
+function applyWhitelist(parsed, mode) {
+    whitelist.domains = parsed.domains;
+    whitelist.exactUrls = parsed.exactUrls;
+    if (filterMode !== mode) {
+        try {
+            appendEvent(
+                mode === 'failopen' ? 'filter-failopen' : 'filter-on',
+                mode === 'failopen' ? 'whitelist inservible y sin respaldo — dejando pasar todo (internet preservado)' : 'filtro activo'
+            );
+        } catch (_) {}
+    }
+    filterMode = mode;
+}
+
+// Load the whitelist. Precedence (PLAN 0008), NEVER over-block:
+//   1) live whitelist.txt if usable  →  filter
+//   2) else, good one already IN MEMORY  →  keep it (last-known-good, runtime)
+//   3) else, on-disk last-known-good sidecar  →  filter with it (survives reboot)
+//   4) else nothing usable anywhere  →  FAIL OPEN (allow all; internet over filter)
+function loadWhitelist() {
+    const live = readWhitelistFile(CONFIG.WHITELIST_FILE);
+    if (isUsable(live)) {
+        applyWhitelist(live, 'filtering');
+        persistLastGood(live.content);
+        console.log(`Loaded ${whitelist.domains.size} domains and ${whitelist.exactUrls.size} exact URLs from whitelist`);
+        return;
+    }
+
+    if (whitelist.domains.size > 0 || whitelist.exactUrls.size > 0) {
+        console.error('Whitelist read as EMPTY/unusable — keeping the in-memory last-known-good (NOT over-blocking).');
+        return;
+    }
+
+    const disk = readWhitelistFile(CONFIG.LASTGOOD_FILE);
+    if (isUsable(disk)) {
+        applyWhitelist(disk, 'filtering');
+        console.error(`Live whitelist unusable — loaded last-known-good from disk (${whitelist.domains.size} domains). Filtering continues.`);
+        return;
+    }
+
+    // Nothing usable anywhere → FAIL OPEN. Internet is never lost; filter resumes when a
+    // valid whitelist returns (next reload flips back to 'filtering').
+    applyWhitelist({ domains: new Set(), exactUrls: new Set() }, 'failopen');
+    console.error('Whitelist unusable and no last-known-good — FAIL OPEN (allowing all; internet preserved, filter off).');
 }
 
 // Check if hostname is an IP address (IPv4 or IPv6)
@@ -118,6 +189,10 @@ function isIpAddress(hostname) {
 
 // Check if URL is whitelisted
 function isWhitelisted(url) {
+    // PLAN 0008 fail-open floor: when the whitelist is unusable and we have no
+    // last-known-good, allow EVERYTHING (internet over filter). Covers both the HTTP
+    // request path and the HTTPS CONNECT path, since both gate on this function.
+    if (filterMode === 'failopen') return true;
     try {
         const urlLower = url.toLowerCase();
         
@@ -492,7 +567,13 @@ server.on('error', (err) => {
 loadWhitelist();
 server.listen(CONFIG.PORT, () => {
     // Record the port we actually bound so every checker/setter agrees on it.
-    try { writeChosenPort(CONFIG.PORT); } catch (_) {}
+    // Plan-0007 exception: the scaffold proxy (spawned by self-update with
+    // WATCHER_NO_PERSIST_PORT=1) is transient and must NOT overwrite proxy-port.txt
+    // with its scaffold port — self-update owns that file during the cutover, and
+    // every watchdog/checker must keep reading the home port for the whole thing.
+    if (process.env.WATCHER_NO_PERSIST_PORT !== '1') {
+        try { writeChosenPort(CONFIG.PORT); } catch (_) {}
+    }
     try { appendEvent('proxy-up', `escuchando 127.0.0.1:${CONFIG.PORT}`); } catch (_) {}
     console.log(`\n========================================`);
     console.log(`  Proxy Server Started Successfully`);

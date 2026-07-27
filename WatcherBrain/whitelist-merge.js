@@ -73,8 +73,13 @@ function writeInPlace(filePath, content) {
     const buf = Buffer.from(content, 'utf-8');
     const fd = fs.openSync(filePath, 'r+');
     try {
-        fs.ftruncateSync(fd, 0);
+        // Write-then-truncate, NOT truncate-then-write: truncating first leaves the
+        // file EMPTY for the whole write, so a power cut on the banca in that window
+        // would zero the whitelist → the proxy then blocks EVERY site. Writing first
+        // and trimming the leftover old tail after means an interrupted write leaves
+        // the OLD content, the NEW content, or new+old-tail — never empty.
         fs.writeSync(fd, buf, 0, buf.length, 0);
+        fs.ftruncateSync(fd, buf.length);
     } finally {
         fs.closeSync(fd);
     }

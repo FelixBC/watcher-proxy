@@ -35,7 +35,28 @@ function readChosenPort() {
 }
 
 function writeChosenPort(port) {
-    try { fs.writeFileSync(PORT_FILE, String(port), 'utf-8'); } catch (_) { /* best effort */ }
+    // Hidden+System-safe (see the disguise note in CLAUDE.md and self-update.js's
+    // writeFileInPlace): the install marks proxy-port.txt +h +s (InstallWatcher.bat),
+    // and a plain writeFileSync (CREATE_ALWAYS) EPERMs against those attributes — which
+    // silently no-op'd every rewrite. Overwrite IN PLACE (r+ + truncate) when the file
+    // already exists so the attributes are preserved and the write actually lands.
+    try {
+        const data = String(port);
+        if (!fs.existsSync(PORT_FILE)) {
+            fs.writeFileSync(PORT_FILE, data, 'utf-8');
+            return;
+        }
+        const buf = Buffer.from(data, 'utf-8');
+        const fd = fs.openSync(PORT_FILE, 'r+');
+        try {
+            // Write-then-truncate (never leave the file momentarily empty) — see the
+            // durability note in whitelist-merge.js's writeInPlace.
+            fs.writeSync(fd, buf, 0, buf.length, 0);
+            fs.ftruncateSync(fd, buf.length);
+        } finally {
+            fs.closeSync(fd);
+        }
+    } catch (_) { /* best effort */ }
 }
 
 // Can we bind this port on 127.0.0.1 right now? (Brief listen + close.)
@@ -57,6 +78,22 @@ async function selectFreePort() {
     return PRIMARY_PORT;
 }
 
+// The SECOND port used only during a plan-0007 blue-green OTA cutover: the new
+// version listens here (port B) while the OLD version keeps filtering on the
+// persisted home port (A), so there's no gap where nothing is listening. Drawn
+// from the SAME fixed candidate pool as normal selection — never a random search,
+// so it stays inside the obscure/dynamic range reasoned about above. Returns null
+// (NOT a fallback port) when nothing in the pool qualifies; the caller
+// (self-update.js) reads null as "no scaffold free" and degrades to the
+// same-port cutover path instead of forcing a port that isn't actually free.
+async function selectScaffoldPort(homePort) {
+    for (const p of PORT_CANDIDATES) {
+        if (p === homePort) continue;
+        if (await isFree(p)) return p;
+    }
+    return null;
+}
+
 // CLI: `node proxy-port.js select` → choose a free port, write it, print it.
 if (require.main === module && process.argv[2] === 'select') {
     selectFreePort().then((p) => {
@@ -66,4 +103,4 @@ if (require.main === module && process.argv[2] === 'select') {
     }).catch(() => { writeChosenPort(PRIMARY_PORT); process.exit(0); });
 }
 
-module.exports = { PORT_CANDIDATES, PRIMARY_PORT, PORT_FILE, readChosenPort, writeChosenPort, isFree, selectFreePort };
+module.exports = { PORT_CANDIDATES, PRIMARY_PORT, PORT_FILE, readChosenPort, writeChosenPort, isFree, selectFreePort, selectScaffoldPort };

@@ -96,8 +96,11 @@ como gate E2E antes de shippear.
    `docs/adr/0001-relax-port-lock-during-update-cutover.md`**.
 3. **[abierta — se cierra en build]** Latencia del segundo arranque + comportamiento del firewall del
    puerto nuevo, MEDIDOS en la test PC (AC6/AC7).
-4. **[abierta — se cierra en build/SOLVE]** Tamaño del pool (¿2 o 3 puertos?) y mecanismo de atomicidad
-   del cutover (`ProxyServer` de registro + `proxy-port.txt` + el `writeChosenPort`-al-escuchar de
-   proxy-server) para que ningún tick del watchdog lea un estado inconsistente.
+4. **[RESUELTA — build 2026-07-25]** Pool = los **3** puertos ya existentes de `proxy-port.js`
+   ([49732, 53187, 61045]): hogar + 2 andamios posibles. Atomicidad del cutover: el **registro
+   `ProxyServer` es la fuente de verdad del puerto vivo** (no `proxy-port.txt`, que se queda = hogar);
+   self-update lo escribe siempre DESPUÉS de que el puerto escuche, y el watchdog aplica el golden-rule
+   **reactivamente** contra ese puerto durante el flag → ningún tick lee un estado inconsistente. Detalle
+   en ADR 0001 §Actualización.
 5. **[RESUELTA — Felix 2026-07-25]** Build **SECUENCIAL**: arranca tras verificar + desplegar 0006. 0007
    PARKED hasta entonces.

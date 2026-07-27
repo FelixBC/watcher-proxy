@@ -127,8 +127,23 @@ function Test-ShouldStayUnplugged {
     return $true
 }
 
+# Plan 0007 (ADR 0001, R1): run the FIRST iteration IMMEDIATELY, sleeping only
+# BETWEEN iterations. On a reboot that froze ProxyEnable=1 on a now-dead port mid-
+# cutover, this makes the reactive golden-rule correction (fail-open, via
+# SetProxyByAvailability) happen on the watchdog's very first tick instead of after a
+# leading 5s wait — shrinking the irreducible fail-closed micro-window. The sleep is
+# gated (not moved to the loop bottom) because the body has early `continue`s that
+# would otherwise busy-loop.
+$firstTick = $true
 while ($true) {
-    Start-Sleep -Seconds 5
+    if (-not $firstTick) { Start-Sleep -Seconds 5 }
+    $firstTick = $false
+
+    # Re-read the chosen port each tick (plan 0007): a home-rebind-deferred update can
+    # adopt the scaffold as the new home mid-run (writeChosenPort), and this loop must
+    # follow proxy-port.txt rather than keep probing the dead former home port (which
+    # would spawn a doomed EADDRINUSE proxy every tick). Cheap: a tiny local file read.
+    if (Test-Path $pf) { $v = (Get-Content $pf -Raw -ErrorAction SilentlyContinue).Trim(); if ($v -match '^\d+$') { $ProxyPort = [int]$v } }
 
     $unplugNow = Test-ShouldStayUnplugged
 
