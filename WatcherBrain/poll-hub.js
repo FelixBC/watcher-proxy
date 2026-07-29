@@ -117,6 +117,29 @@ function readLocalAgentVersion() {
     return fs.existsSync(VERSION_PATH) ? fs.readFileSync(VERSION_PATH, 'utf-8').trim() : '0.0.0';
 }
 
+// The Windows edition/version, reported on every poll (additive — an old hub
+// ignores it) so the fleet knows its Win10-vs-Win11 + feature-version mix without
+// a manual "scout" link. Read from the registry, whose VALUE NAMES (CurrentBuild,
+// DisplayVersion) are language-independent — unlike `Get-ComputerInfo`/`systeminfo`
+// text, which is localized (the terminals run Spanish Windows). Classify Win10 vs
+// Win11 by BUILD (>= 22000 = Win11): ProductName is unreliable — it still reads
+// "Windows 10" on Win11 (a known Microsoft quirk). Best-effort: any failure returns
+// null and the poll just omits the field (never throws — this is the poll path).
+function readOsVersion() {
+    try {
+        const out = execSync('reg query "HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion"',
+            { encoding: 'utf-8', timeout: 5000, windowsHide: true });
+        const build = (out.match(/\bCurrentBuild\b\s+REG_SZ\s+(\d+)/) || [])[1];
+        const disp = (out.match(/\bDisplayVersion\b\s+REG_SZ\s+(\S+)/) || [])[1];
+        const b = parseInt(build, 10);
+        if (!Number.isFinite(b)) return null;
+        const name = b >= 22000 ? 'Windows 11' : 'Windows 10';
+        return disp ? `${name} ${disp}` : `${name} (build ${b})`;
+    } catch (e) {
+        return null;
+    }
+}
+
 // Parse a dotted numeric version ("1.0.16") into comparable parts. Non-numeric
 // or missing segments become 0, so a malformed string degrades to 0.0.0 rather
 // than throwing (this runs on the golden-rule path — never crash the poll).
@@ -416,6 +439,8 @@ async function main() {
         logs: readNewBlockedLogLines(),
         recent_visits: readRecentVisits(),
     };
+    const osVersion = readOsVersion();
+    if (osVersion) body.os_version = osVersion;
     const firstVisit = readFirstVisit();
     if (firstVisit) body.first_visit = firstVisit;
 

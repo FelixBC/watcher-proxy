@@ -12,6 +12,14 @@ REM task runs as SYSTEM, which has the rights to change printer config that a st
 REM "banca" user does not. The disruptive spool CLEAR below stays once per day.
 powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "%SCRIPT_DIR%HardenPrinters.ps1" >nul 2>&1
 
+REM EVERY logon (same SYSTEM context + reasoning as HardenPrinters above): re-assert power
+REM resilience so this machine keeps REPORTING through sleep/battery -- Wi-Fi = maximum
+REM performance (AC+DC) + never sleep on AC. Must run as SYSTEM (powercfg needs elevation
+REM a standard "banca" user lacks); this task provides it, the least-privilege watchdog
+REM does NOT. Reaches already-installed bancas via OTA (this .bat is OTA-updated and the
+REM logon task already exists) -- no new task to register. See HardenPower.ps1 + plan 0009.
+powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "%SCRIPT_DIR%HardenPower.ps1" >nul 2>&1
+
 set "MARKER_FILE=%SCRIPT_DIR%last_spool_cleanup_day.txt"
 
 for /f "delims=" %%D in ('powershell -NoProfile -WindowStyle Hidden -Command "(Get-Date).ToString('yyyyMMdd')" 2^>nul') do set TODAY=%%D

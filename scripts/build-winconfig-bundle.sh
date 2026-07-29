@@ -121,6 +121,98 @@ is_excluded() {
     return 1
 }
 
+# ------------------------------------------------------------------------------
+# Windows-hostile filename guard. The exclude mechanism above is ALLOW-by-default
+# (tracked + not-gitignored), and .gitignore is extension/path-shaped — so a stray
+# file whose NAME is the problem sails straight through it. Real case: an accidental
+# `$LOG` in the repo root (a shell redirect whose variable never expanded). `*.log`
+# does not match `$LOG`, `git check-ignore` does not ignore it, and the *.log
+# self-check further down never sees it either — so it shipped inside the bundle.
+#
+# Two families are refused, both fatal for a Windows payload:
+#   1. INVALID on Win32 — the zip cannot even extract cleanly: <>:"|?*\ , control
+#      characters, reserved device names (CON/PRN/AUX/NUL/COM#/LPT#), and a segment
+#      with a trailing dot or space.
+#   2. DANGEROUS — legal on NTFS, but a metacharacter in the cmd/PowerShell scripts
+#      that ARE this agent: a segment starting with `$` (PowerShell variable), or
+#      containing `%` (cmd variable), a backtick (PowerShell escape), `!` (cmd
+#      delayed expansion — InstallWatcher.bat and CleanPrintSpoolOncePerDay.bat both
+#      `setlocal enabledelayedexpansion`), or `&` (cmd command separator).
+#
+# Deliberately scoped to the git-derived set and applied AFTER is_excluded, not over
+# the whole stage: a stray is a working-tree accident, whereas WatcherBrain/node/ is
+# a downloaded Node distribution whose file names this guard must never get to veto
+# (it would block a release over something we don't own).
+#
+# The SAME rule guards the OTA path in watcher-fleet/scripts/publish-agent.mjs (there
+# it runs over the built zip's entry list). Keep the two rule sets in step.
+# ------------------------------------------------------------------------------
+windows_hostile_reason() {
+    # Prints a reason and returns 0 when the path is unsafe for a Windows payload.
+    # Splits on "/" with parameter expansion, never word splitting: `for seg in $path`
+    # would pathname-expand the very `*`/`?` characters this is looking for.
+    local rest="$1" seg base upper
+    while [[ -n "$rest" ]]; do
+        seg="${rest%%/*}"
+        if [[ "$rest" == */* ]]; then rest="${rest#*/}"; else rest=""; fi
+        [[ -z "$seg" ]] && continue
+
+        case "$seg" in
+            *'<'*|*'>'*|*':'*|*'"'*|*'|'*|*'?'*|*'*'*|*'\'*)
+                echo "illegal Windows character"; return 0 ;;
+        esac
+        if [[ "$seg" =~ [[:cntrl:]] ]]; then
+            echo "control character"; return 0
+        fi
+        case "$seg" in
+            *. | *' ')
+                echo "trailing dot or space"; return 0 ;;
+        esac
+        base="${seg%%.*}"
+        upper="$(printf '%s' "$base" | tr '[:lower:]' '[:upper:]')"   # bash 3.2: no ${x^^}
+        case "$upper" in
+            # Win32 also treats the superscript digits ¹²³ as device numbers (COM¹ ≡ COM1).
+            # Spelled out instead of a [0-9¹²³] bracket expression: bash 3.2 bracket matching
+            # over multibyte characters is locale-dependent and not reliable here.
+            CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9]|COM¹|COM²|COM³|LPT¹|LPT²|LPT³)
+                echo "reserved Windows device name"; return 0 ;;
+        esac
+        case "$seg" in
+            '$'*)  echo "starts with '\$' (PowerShell variable)"; return 0 ;;
+            *'%'*) echo "contains '%' (cmd variable)"; return 0 ;;
+            *'`'*) echo "contains a backtick (PowerShell escape)"; return 0 ;;
+            *'!'*) echo "contains '!' (cmd delayed expansion)"; return 0 ;;
+            *'&'*) echo "contains '&' (cmd command separator)"; return 0 ;;
+            # `^` is the cmd escape character. Kept in step with the OTA guard in
+            # publish-agent.mjs, where it does double duty: `unzip -Z1` renders a control
+            # character in caret notation, so rejecting `^` is what keeps that guard's
+            # control-character rule reachable. Here git quotes such a path instead
+            # (it lists as "tab\tname.js"), which the illegal-character rule already
+            # catches — but the two rule sets stay identical on purpose.
+            *'^'*) echo "contains '^' (cmd escape / escaped control character)"; return 0 ;;
+        esac
+    done
+    return 1
+}
+
+hostile=0
+for f in "${FILES[@]}"; do
+    if is_excluded "$f"; then
+        continue
+    fi
+    if reason="$(windows_hostile_reason "$f")"; then
+        echo "ERROR: refusing to package '$f' — $reason." >&2
+        hostile=$((hostile + 1))
+    fi
+done
+if [[ $hostile -gt 0 ]]; then
+    echo "" >&2
+    echo "$hostile file name(s) above are invalid or unsafe on Windows — aborting, nothing written." >&2
+    echo "These are almost certainly stray files (e.g. a shell redirect that never expanded)." >&2
+    echo "Delete them from $REPO_ROOT, or add them to .gitignore, then re-run." >&2
+    exit 1
+fi
+
 copied=0
 for f in "${FILES[@]}"; do
     if is_excluded "$f"; then
