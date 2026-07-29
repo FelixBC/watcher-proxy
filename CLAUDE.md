@@ -105,5 +105,26 @@ before assuming the current `VERSION`/OTA state.
   test PC and QAs → verify via the fleet dashboard + SSH into the test PC
   (`ssh -i ~/.ssh/watcher_testpc_key fcmag@10.0.30.222`, PowerShell 5.1, install at
   `C:\Users\fcmag\Downloads\winconfig-install\WinConfig`).
+- **The test PC IS the fleet's `staging` machine** (it carries `WatcherBrain/staging.flag`), and it is
+  a DEDICATED box for trying things, sitting next to Felix — not a banca serving customers. Two
+  consequences worth knowing before asking him for anything:
+    - Publishing a release is already the whole staging test. A staging machine is served the new
+      version on its next poll **regardless of its hash ring**, runs the acceptance self-test, and
+      opens ring 0 by itself once it bakes healthy (`STAGING_BAKE_MS`, ~45 min). Nothing needs
+      forcing — `forceOpenRing0` only skips that gate, it doesn't make anything else happen.
+    - It is also the ONLY machine, and it is excluded from the ring health judgment (`is_staging`),
+      so the cron's auto-advance can never fire (it needs ≥3 awake on-target non-staging machines).
+      Ring advance past 0 is manual in `/rollout`, and "no machines to test rings 1-2" is expected,
+      not a fault. More VMs would not fix it: ring 0 is 5% of the fleet by `fnv1a32(hardware_id)`.
+  Its state is readable over SSH without any hub credential — `VERSION`, `staging.flag`,
+  `selftest-state.json` (per-invariant pass/fail), `update-failed.json`, `update.log` (the
+  blue-green cutover narrates itself there), and the live port from `proxy-port.txt` (never assume
+  8080). **Reachability moves:** `10.0.30.222` is current; some plan docs say `10.0.0.72` from a
+  stint on another network — try both before concluding it is down.
+- **Running PowerShell over SSH:** pass `powershell -NoProfile -NonInteractive -EncodedCommand
+  <base64-UTF16LE>` instead of an inline script. Anything non-trivial gets mangled by the
+  zsh → ssh → PowerShell quoting chain (a bare `-Tail` was read as a command named `tail`); write
+  the script to a file, `iconv -f UTF-8 -t UTF-16LE | base64`, and send that. Output carries a
+  `#< CLIXML` progress wrapper — grep your own `KEY=value` markers rather than parsing positionally.
 - **Deep-bug method:** cross-review between this agent (Fable) and Codex (`codex exec`) before
   shipping a fix in a risk-surface area (self-update, watchdog, uninstall gate).
