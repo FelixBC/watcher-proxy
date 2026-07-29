@@ -116,11 +116,21 @@ before assuming the current `VERSION`/OTA state.
       so the cron's auto-advance can never fire (it needs ≥3 awake on-target non-staging machines).
       Ring advance past 0 is manual in `/rollout`, and "no machines to test rings 1-2" is expected,
       not a fault. More VMs would not fix it: ring 0 is 5% of the fleet by `fnv1a32(hardware_id)`.
-  Its state is readable over SSH without any hub credential — `VERSION`, `staging.flag`,
-  `selftest-state.json` (per-invariant pass/fail), `update-failed.json`, `update.log` (the
-  blue-green cutover narrates itself there), and the live port from `proxy-port.txt` (never assume
-  8080). **Reachability moves:** `10.0.30.222` is current; some plan docs say `10.0.0.72` from a
-  stint on another network — try both before concluding it is down.
+- **SSH to it is a STANDING capability, not a favour to request.** The box is always powered and
+  beside Felix, always on the same LAN as the Mac, with SSH always enabled and the session holding a
+  full admin token (so remote elevated installs work). Never ask him to read something off it that
+  SSH can read — **connect and look**. Readable with no hub credential at all: `VERSION`,
+  `staging.flag`, `selftest-state.json` (per-invariant pass/fail), `update-failed.json`,
+  `update.log` (the blue-green cutover narrates itself there), and the live port from
+  `proxy-port.txt` (never assume 8080). **Reachability moves:** `10.0.30.222` is current; some plan
+  docs say `10.0.0.72` from a stint on another network — try both before concluding it is down.
+- **Three verification lanes, blind in different ways — pick the right one, not the convenient one.**
+  SSH sees internal state but never a pixel. Felix's eyes on the physical screen see what a banca
+  worker sees — flashing black windows, popups, the wizard — and nothing internal; he has the machine
+  right there, so a 5-second eyeball is cheap, and it is the ONLY way to check those. The hub
+  dashboard shows what the fleet *believes* (rings, stable, `os_version`) and needs HIS session,
+  since every `/rollout` action goes through `requireAdmin()`. Ask him only for what SSH structurally
+  cannot see.
 - **Running PowerShell over SSH:** pass `powershell -NoProfile -NonInteractive -EncodedCommand
   <base64-UTF16LE>` instead of an inline script. Anything non-trivial gets mangled by the
   zsh → ssh → PowerShell quoting chain (a bare `-Tail` was read as a command named `tail`); write
