@@ -61,6 +61,17 @@ máquina. Un intento de retener tickets era, en la práctica, invisible.
      anti-hijack en un reinstall, 429, o sin red al instalar) igual poletea cada 2 min y
      es JUSTO la que el operador no ve en el dashboard: dejar sus impresoras sin guard es
      el peor caso, no uno aceptable.
+   - **La tarea `WinConfig Sync` se crea INCONDICIONALMENTE** (`InstallWatcher.bat`, fuera
+     del gate `if exist HubConfig.json`). Cierra el 2º sub-caso del P1 de Codex: una
+     install sin `HubConfig.json` antes no tenía disparador periódico alguno. Elegí
+     hacer incondicional la tarea que YA existe en vez de crear una tarea de hardening
+     aparte, a propósito: (a) el poll ya es el único disparador periódico elevado y ya
+     lleva el re-assert por OTA a la flota instalada; (b) una tarea separada correría el
+     `.ps1` directo sin pasar por el throttle del marker, así que en TODA banca enrolada
+     el hardening correría 2×/hora (poll + tarea) — desperdicio evitable. Una tarea, un
+     throttle, sin redundancia. En una máquina sin HubConfig el poll endurece y luego
+     sale "nothing to do" (nunca llega a `readHubConfig`, que está tras el return), así
+     que crear la tarea sin fleet es inocuo.
    - Reloj = `mtime` de `WatcherBrain/harden-last.txt`, estampado **antes** de correr
      los scripts: si uno se cuelga, el costo del timeout se paga una vez por hora, no
      en cada poll de 2 min. El stamp usa el idioma `r+` + `ftruncate` de
@@ -137,14 +148,11 @@ verificado que los PRs #2/#3/#4 de `FelixBC/watcher-proxy` no tienen actividad d
 
 ## Límites conocidos (NO cerrados por este plan)
 
-- **Install SIN `HubConfig.json` no tiene disparador periódico** (segundo sub-caso del P1 de
-  Codex). La tarea `WinConfig Sync` solo se crea si existe `HubConfig.json`
-  (`InstallWatcher.bat` la mete dentro de ese `if`; el `else` solo imprime "skipping fleet
-  features"), así que `poll-hub.js` nunca corre → mover la llamada no lo cubre. **Pero el
-  bundle SIEMPRE trae `HubConfig.json`** (lo escribe `build-winconfig-bundle.sh`, HubUrl sin
-  secreto), así que es una config manual/borde, no una banca real; y esa install igual
-  conserva el guard de logon (Step 4 va fuera del gate). Cerrarlo requeriría una tarea
-  periódica elevada propia, independiente del poll — **decisión de Felix**, no la tomé sola.
+- ~~**Install SIN `HubConfig.json` no tiene disparador periódico.**~~ **CERRADO** (Felix pidió
+  cubrirlo): la tarea `WinConfig Sync` ahora se crea incondicionalmente — ver §Fix punto 1,
+  último sub-bullet. Nota de alcance: solo afecta a installs FRESCAS. Una máquina ya
+  instalada sin HubConfig (que en la práctica no existe — el bundle siempre lo trae) no
+  recibiría la tarea de forma retroactiva; ese conjunto es vacío en campo.
 - **Impresoras mapeadas por usuario (`\\servidor\cola`) son invisibles a SYSTEM.**
   Viven en la hive del usuario, así que `Get-Printer` como SYSTEM no las lista. Es el
   trade que el diseño ya hacía (SYSTEM es lo único que tiene "Manage this printer"),

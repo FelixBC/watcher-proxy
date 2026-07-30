@@ -306,36 +306,48 @@ if exist "%BRAIN_DIR%\HubConfig.json" (
         echo        This does NOT retry automatically; re-run the installer to connect it.
     )
     endlocal
-
-    REM Run the poll as SYSTEM (not the install user "interactive only"): the fleet
-    REM poll MUST fire regardless of WHO is logged on. On a real terminal the CAJERO
-    REM (a standard user, not the admin who installed) is the interactive user, so an
-    REM "interactive only" task owned by the admin would never fire and the machine
-    REM would never report. SYSTEM can read/write the install folder + credential +
-    REM runtime files, and runs in session 0 (no window).
-    schtasks /delete /tn "WinConfig Sync" /f >nul 2>&1
-    schtasks /create /tn "WinConfig Sync" /tr "wscript \"%BRAIN_DIR%\RunPollHubHidden.vbs\"" /sc minute /mo 2 /ru SYSTEM /rl highest /f >nul 2>&1
-    if %ERRORLEVEL% EQU 0 (
-        echo        [OK] Will check in with the dashboard every 2 minutes
-    ) else (
-        echo        [WARNING] Could not schedule fleet polling
-    )
-    REM CRITICAL: schtasks defaults DisallowStartIfOnBatteries=true, so on a LAPTOP or
-    REM UPS-backed terminal running on battery the scheduled poll NEVER fires (manual
-    REM /run bypasses it, hiding the bug). schtasks can't clear that, so patch the task
-    REM settings via PowerShell: allow on battery, don't stop on battery, and run as
-    REM soon as possible after a missed start. Verified on-battery on the test laptop.
-    REM Also cap the execution time at 5 min (schtasks defaults 72h): a poll normally
-    REM finishes in seconds (poll-hub has its own 15s/6s request timeouts), so if one
-    REM ever hung, the 72h default + IgnoreNew would block reporting for up to 3 days;
-    REM PT5M lets the next scheduled poll recover in minutes. Idle/network conditions
-    REM stay OFF (New-ScheduledTaskSettingsSet defaults) so an active cajero or a brief
-    REM WiFi blip never stops the poll from firing.
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "try{ $s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 5); Set-ScheduledTask -TaskName 'WinConfig Sync' -Settings $s | Out-Null }catch{}" >nul 2>&1
 ) else (
-    echo        [INFO] No HubConfig.json found - skipping fleet dashboard features.
-    echo        Proxy filtering works normally either way. See WatcherBrain\HubConfig.example.json.
+    echo        [INFO] No HubConfig.json found - skipping fleet ENROLLMENT (dashboard
+    echo        visibility, bulk whitelist push, remote update). Proxy filtering AND the
+    echo        periodic local hardening below both run either way. See HubConfig.example.json.
 )
+
+REM The "WinConfig Sync" task is created UNCONDITIONALLY - deliberately OUTSIDE the
+REM HubConfig gate above. Besides polling the fleet it is the ONLY always-on ELEVATED
+REM (SYSTEM /rl highest) periodic trigger for the LOCAL hardening re-assert in
+REM poll-hub.js (reassertHardeningIfDue, which runs ABOVE poll's not-enrolled guard).
+REM A banca stays powered for DAYS without a real logon, so without a periodic trigger
+REM the printer Keep=OFF + power hardening would only re-apply at logon - possibly a
+REM week apart. On a machine with NO HubConfig/credential poll-hub still hardens, then
+REM exits "nothing to do" for the fleet half (readHubConfig is never reached - it is
+REM after the not-enrolled return), so this is safe to create even with no fleet. See
+REM docs/plans/0010.
+REM
+REM Runs as SYSTEM (not the install user "interactive only"): the poll MUST fire
+REM regardless of WHO is logged on. On a real terminal the CAJERO (a standard user, not
+REM the admin who installed) is the interactive user, so an "interactive only" task
+REM owned by the admin would never fire and the machine would never report/harden.
+REM SYSTEM can read/write the install folder + credential + runtime files, and runs in
+REM session 0 (no window).
+schtasks /delete /tn "WinConfig Sync" /f >nul 2>&1
+schtasks /create /tn "WinConfig Sync" /tr "wscript \"%BRAIN_DIR%\RunPollHubHidden.vbs\"" /sc minute /mo 2 /ru SYSTEM /rl highest /f >nul 2>&1
+if %ERRORLEVEL% EQU 0 (
+    echo        [OK] Local hardening re-asserts ~hourly; fleet check-in every 2 min when enrolled
+) else (
+    echo        [WARNING] Could not schedule the periodic maintenance/poll task
+)
+REM CRITICAL: schtasks defaults DisallowStartIfOnBatteries=true, so on a LAPTOP or
+REM UPS-backed terminal running on battery the scheduled poll NEVER fires (manual
+REM /run bypasses it, hiding the bug). schtasks can't clear that, so patch the task
+REM settings via PowerShell: allow on battery, don't stop on battery, and run as
+REM soon as possible after a missed start. Verified on-battery on the test laptop.
+REM Also cap the execution time at 5 min (schtasks defaults 72h): a poll normally
+REM finishes in seconds (poll-hub has its own 15s/6s request timeouts), so if one
+REM ever hung, the 72h default + IgnoreNew would block reporting for up to 3 days;
+REM PT5M lets the next scheduled poll recover in minutes. Idle/network conditions
+REM stay OFF (New-ScheduledTaskSettingsSet defaults) so an active cajero or a brief
+REM WiFi blip never stops the poll from firing.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try{ $s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 5); Set-ScheduledTask -TaskName 'WinConfig Sync' -Settings $s | Out-Null }catch{}" >nul 2>&1
 
 REM Secure the master code for OFFLINE uninstall: derive a salted scrypt hash
 REM (WatcherBrain\uninstall-code.hash) from the transient plaintext captured at
