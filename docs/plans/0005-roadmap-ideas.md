@@ -36,8 +36,9 @@ Para cada prueba/release:
 - Todo en la **zona horaria correcta** (ver E).
 
 ### D. Detectar intento de desactivar el spool (anti-robo) → tamper
-- HardenPrinters ya revierte Keep=ON; falta que lo **reporte como `tamper`** (no solo log local) → fluye al fleet + a la **alerta roja** ("intentó retener tickets").
-- También detectar si **borran/desactivan la tarea del spool**.
+- ~~HardenPrinters ya revierte Keep=ON; falta que lo **reporte como `tamper`**~~ → **HECHO en v1.0.32, plan 0010** (verificado en HW: el hub aceptó el evento). Ahí mismo se arregló que el guard solo se re-aplicaba en el logon, lo que en la banca típica (encendida días, sin apagar) significaba que casi nunca corría.
+- **Falta**: detectar si **borran/desactivan la tarea** (`WinConfig Cleanup At Logon`, `WinConfig Sync`). Con 0010 el poll es el guard primario de impresoras, así que borrar la tarea de logon ya no abre el hueco de Keep; borrar `WinConfig Sync` sí, y hoy solo se ve como máquina "sin reportar".
+- **Falta**: los trabajos YA retenidos sobreviven hasta el barrido diario (ver §Límites de 0010) — purgarlos al detectar Keep=ON arriesga matar un ticket imprimiéndose; decisión pendiente.
 - Encaja con la alerta de tamper ya construida (0004-ish).
 
 ### E. Fix de zona horaria (dashboard → Eastern/Florida fijo)

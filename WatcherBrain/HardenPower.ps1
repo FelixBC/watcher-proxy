@@ -11,11 +11,15 @@
 #     cover the wake).
 #
 # Always runs ELEVATED (powercfg needs it): at install from InstallWatcher (the elevated
-# installer / Administrators) and re-asserted every logon AS SYSTEM by the "WinConfig
-# Cleanup At Logon" task (CleanPrintSpoolOncePerDay.bat), NOT the watchdog: the watchdog
+# installer / Administrators), re-asserted every logon AS SYSTEM by the "WinConfig
+# Cleanup At Logon" task (CleanPrintSpoolOncePerDay.bat), and — since plan 0010 — ~hourly
+# AS SYSTEM by the "WinConfig Sync" poll task (poll-hub.js reassertHardeningIfDue). That
+# last caller is the one that covers normal banca behaviour: the PC is left ON for days,
+# hibernated or merely locked, and an onlogon trigger does NOT fire on resume or unlock,
+# so the logon task alone can go a week without running. NOT the watchdog: the watchdog
 # loop runs as BUILTIN\Users (least-privilege, to manage the per-user proxy) so powercfg
-# would fail there. The logon task reaches already-installed bancas via OTA
-# (its .bat is OTA-updated and the task already exists) and self-heals a Windows reset.
+# would fail there. Both SYSTEM callers reach already-installed bancas via OTA
+# (their files are OTA-updated and both tasks already exist) and self-heal a Windows reset.
 # Changing power scheme values needs elevation, which a standard "banca" user
 # does NOT have (so the cashier can't undo it either). Best-effort + idempotent: it
 # never throws, always exits 0, and only writes to the log when it actually changes

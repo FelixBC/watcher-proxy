@@ -46,6 +46,11 @@ const STAGING_FLAG_PATH = path.join(BRAIN_DIR, 'staging.flag');
 const TAMPER_CURSOR_PATH = path.join(BRAIN_DIR, 'tamper-cursor.txt');
 const GET_LOCATION_PS = path.join(BRAIN_DIR, 'GetLocation.ps1');
 const EVENTS_LOG_PATH = path.join(BRAIN_DIR, 'events.log');
+// Plan 0010: the two SYSTEM-only hardening scripts this poll re-asserts ~hourly, and the
+// marker whose mtime is the "when did we last do it" clock (no content is ever read).
+const HARDEN_PRINTERS_PS = path.join(BRAIN_DIR, 'HardenPrinters.ps1');
+const HARDEN_POWER_PS = path.join(BRAIN_DIR, 'HardenPower.ps1');
+const HARDEN_MARKER_PATH = path.join(BRAIN_DIR, 'harden-last.txt');
 
 // Failed-version cooldown: self-update.js writes update-failed.json {version,failedAt}
 // when a genuine update fails its post-update health check and rolls back. We honor
@@ -55,6 +60,7 @@ const EVENTS_LOG_PATH = path.join(BRAIN_DIR, 'events.log');
 const UPDATE_FAILED_PATH = path.join(BRAIN_DIR, 'update-failed.json');
 const FAILED_VERSION_COOLDOWN_MS = 60 * 60 * 1000; // 60 min
 const LOCATION_MAX_AGE_MS = 55 * 60 * 1000; // sample ~hourly
+const HARDEN_MAX_AGE_MS = 55 * 60 * 1000; // re-assert hardening ~hourly (see reassertHardeningIfDue)
 
 // Spread hub hits across this window (anti-thundering-herd). Sized to the ~2-min
 // poll cadence: 30s decorrelates machines that fired together without stretching
@@ -308,6 +314,77 @@ function refreshLocationIfDue(force) {
     }
 }
 
+// Re-assert the two SYSTEM-only hardening scripts (printer Keep=OFF, power/radio)
+// ~hourly. Plan 0010.
+//
+// WHY THIS LIVES IN THE POLL: both were only ever re-applied at install and by the
+// "WinConfig Cleanup At Logon" task. But a banca is routinely left ON for DAYS —
+// hibernated, or just locked, frequently not even that — and an `onlogon` trigger does
+// NOT fire on resume-from-hibernate or on unlock: Windows RESTORES the existing session
+// instead of creating one. So on the machines that behave most normally, the logon task
+// can go a week without running, and anything that flips Keep=ON or re-enables Wi-Fi
+// power saving mid-session (a driver install, a Windows update touching print drivers,
+// someone with admin) stays flipped that entire time. "WinConfig Sync" is the ONLY
+// always-running task with the rights to fix it: it runs as SYSTEM /rl highest and is
+// independent of any logon, while the minute-frequency watchdog tasks run as
+// BUILTIN\Users (LeastPrivilege) and cannot change printer or power config at all.
+//
+// GOLDEN RULE: both scripts are orthogonal to filtering — neither reads or writes
+// ProxyEnable/ProxyServer, neither starts or stops the proxy — so this is safe to run in
+// any state (filtering, unplugged, mid-update). Best-effort and individually time-boxed:
+// a missing or hung script can never fail a poll, it just leaves the hardening for the
+// next hour.
+function reassertHardeningIfDue() {
+    try {
+        const stat = fs.existsSync(HARDEN_MARKER_PATH) ? fs.statSync(HARDEN_MARKER_PATH) : null;
+        if (stat && Date.now() - stat.mtimeMs <= HARDEN_MAX_AGE_MS) return;
+        // Stamp BEFORE running: if a script hangs to its timeout we pay that cost once an
+        // hour, not on every 2-min poll. If the stamp itself fails we skip this cycle
+        // rather than risk re-running every poll forever.
+        if (!touchHardenMarker()) return;
+        for (const script of [HARDEN_PRINTERS_PS, HARDEN_POWER_PS]) {
+            try {
+                if (!fs.existsSync(script)) continue;
+                require('child_process').execFileSync(
+                    'powershell',
+                    ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script],
+                    { timeout: 25000, stdio: 'ignore' }
+                );
+            } catch (e) {
+                /* per-script best effort — one failing must not skip the other */
+            }
+        }
+    } catch (e) {
+        /* never break a poll over hardening */
+    }
+}
+
+// Hidden+System-safe stamp (see proxy-port.js's writeChosenPort for the same idiom and
+// the CLAUDE.md disguise note): the install marks agent files +h +s and a plain
+// writeFileSync (CREATE_ALWAYS) EPERMs against those, which would silently freeze the
+// clock at the first stamp and re-run the hardening on EVERY poll. Rewrite in place when
+// the file already exists. Returns whether the stamp landed.
+function touchHardenMarker() {
+    try {
+        const data = new Date().toISOString();
+        if (!fs.existsSync(HARDEN_MARKER_PATH)) {
+            fs.writeFileSync(HARDEN_MARKER_PATH, data, 'utf-8');
+            return true;
+        }
+        const buf = Buffer.from(data, 'utf-8');
+        const fd = fs.openSync(HARDEN_MARKER_PATH, 'r+');
+        try {
+            fs.writeSync(fd, buf, 0, buf.length, 0);
+            fs.ftruncateSync(fd, buf.length);
+        } finally {
+            fs.closeSync(fd);
+        }
+        return true;
+    } catch (e) {
+        return false;
+    }
+}
+
 function readLocation() {
     try {
         if (!fs.existsSync(LOCATION_PATH)) return null;
@@ -387,6 +464,21 @@ function triggerSelfUpdate(version, url, sha256) {
 
 async function main() {
     const cred = readCredential();
+
+    // Re-assert SYSTEM-only hardening (~hourly) — printer Keep=OFF + power/radio. This runs
+    // ABOVE the not-enrolled guard BY DESIGN: it is a purely LOCAL safety property (SYSTEM
+    // rewriting local printer/power config) that needs no credential, no hub, no network, so
+    // it must NOT be coupled to fleet enrollment. A machine that failed to enroll (bad master
+    // code, 409 anti-hijack on a reinstall, 429, or offline at install) still polls every 2
+    // min and is EXACTLY the machine an operator can't see on the dashboard — so leaving its
+    // printers unguarded is the worst case, not an acceptable one. Also stays above
+    // readNewTamperEvents() below, so for an enrolled machine a retention attempt it reverts
+    // is reported in THIS poll, not the next. See plan 0010.
+    // KNOWN LIMIT: an install with NO HubConfig.json never creates the "WinConfig Sync" task,
+    // so it has no periodic trigger here at all — plan 0010 §Límites (the shipped bundle
+    // always includes HubConfig.json, so this is an edge/manual config, not a real banca).
+    reassertHardeningIfDue();
+
     // Not enrolled (no credential on disk). We deliberately do NOT try to
     // re-register here: enrollment needs the plaintext master code, which is
     // captured ONCE at install and never persisted (only its scrypt hash is
@@ -452,7 +544,9 @@ async function main() {
     const location = readLocation();
     if (location) body.location = location;
 
-    // Tamper events (uninstall attempt, etc.) since the last upload.
+    // Tamper events (uninstall attempt, printer retention attempt, etc.) since the last upload.
+    // reassertHardeningIfDue() ran at the TOP of main() (above the not-enrolled guard); its
+    // synchronous `tamper` write is therefore already on disk for this read. See plan 0010.
     const tamper = readNewTamperEvents();
     if (tamper.events.length > 0) body.tamper_events = tamper.events;
 

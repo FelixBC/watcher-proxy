@@ -6,6 +6,10 @@ Watcher.zip
 blocked-requests.log
 watchdog_loop.pid
 last_spool_cleanup_day.txt
+# Per-machine "hardening last re-asserted at" clock (mtime only). Runtime state, so it
+# must never commit or ship in the bundle. Harmless if it did (an old mtime just means
+# "due now"), but keep the folder clean. See poll-hub.js reassertHardeningIfDue.
+WatcherBrain/harden-last.txt
 
 # Fleet dashboard secrets/state — never committed. HubConfig.json holds the
 # enrollment secret (repo is PUBLIC); hub-credential.json is the per-machine

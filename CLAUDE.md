@@ -65,6 +65,15 @@ contract" at the code sites below — grep that phrase if the shape ever needs r
 
 ## Conventions worth knowing
 
+- **A banca is left ON for DAYS — design for it.** Normal banquero behaviour is to leave the PC
+  open and running for multiple days with no intentional shutdown, often not even hibernating
+  (at most locked). So: **never make anything depend on a reboot, a logon, or a fresh session to
+  apply or to self-heal.** Concretely, a `/sc onlogon` task does NOT fire on resume-from-hibernate
+  or on unlock (Windows restores the session instead of creating one), so "re-asserted every logon"
+  can mean "not re-asserted for a week". The only always-running elevated hook is the `WinConfig
+  Sync` poll task (SYSTEM `/rl highest`, every ~2 min) — the minute-frequency watchdog tasks run as
+  `BUILTIN\Users` and cannot touch printer/power/registry-machine config at all. This bit both
+  hardening scripts; see `docs/plans/0010`.
 - **The listen port IS the single-instance lock.** `proxy-server.js` binds a **per-machine OBSCURE
   port chosen at install** (e.g. `49732` on the test PC) — `8080` is only the in-code default; the
   actually-bound port is persisted via `writeChosenPort`/`readChosenPort` so every checker/setter
