@@ -203,8 +203,10 @@ REM informationally instead of raising a ticket-retention tamper alert. Best-eff
 powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%BRAIN_DIR%\HardenPrinters.ps1" -Baseline >nul 2>&1
 REM Enforce power resilience right now (the SYSTEM logon task + the ~hourly poll re-assert it) so
 REM this machine keeps reporting through sleep/battery: Wi-Fi = maximum performance (AC+DC)
-REM and never sleep on AC. Best-effort. See WatcherBrain\HardenPower.ps1 and docs/plans/0009.
-powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%BRAIN_DIR%\HardenPower.ps1" >nul 2>&1
+REM and never sleep on AC. -Baseline: a Wi-Fi/sleep default still on at install is expected
+REM housekeeping, so it logs informationally instead of raising a power tamper alert (mirrors
+REM HardenPrinters.ps1 above). Best-effort. See WatcherBrain\HardenPower.ps1 and docs/plans/0009.
+powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%BRAIN_DIR%\HardenPower.ps1" -Baseline >nul 2>&1
 timeout /t 1 /nobreak >nul
 
 REM Step 5: choose the local port, then start the proxy.

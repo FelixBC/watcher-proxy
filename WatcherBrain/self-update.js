@@ -171,6 +171,10 @@ const PROTECTED_RELATIVE_PATHS = [
     'WatcherBrain/location.json',
     'WatcherBrain/locate-pending.flag',
     'WatcherBrain/tamper-cursor.txt',
+    // Plan 0011: per-machine "guards last confirmed clean" marker. Runtime state, never code — an
+    // OTA (incl. a rollback restore) must not touch it: rewriting it would rewrite the "último OK"
+    // signal. poll-hub reads its CONTENT (not mtime) as a belt, this is the suspenders.
+    'WatcherBrain/guards-ok.txt',
     '.git',
 ];
 
