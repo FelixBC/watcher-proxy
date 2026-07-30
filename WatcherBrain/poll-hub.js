@@ -51,6 +51,11 @@ const EVENTS_LOG_PATH = path.join(BRAIN_DIR, 'events.log');
 const HARDEN_PRINTERS_PS = path.join(BRAIN_DIR, 'HardenPrinters.ps1');
 const HARDEN_POWER_PS = path.join(BRAIN_DIR, 'HardenPower.ps1');
 const HARDEN_MARKER_PATH = path.join(BRAIN_DIR, 'harden-last.txt');
+// Plan 0011: SEPARATE from the throttle clock above. harden-last.txt is stamped BEFORE running
+// (the ~hourly "when did we last try" throttle); this confirm marker is stamped ONLY when the
+// guards actually verified clean this cycle (default-veto — see reassertHardeningIfDue). Its mtime
+// is the "último OK" reported as body.guards_checked_at.
+const HARDEN_OK_MARKER_PATH = path.join(BRAIN_DIR, 'guards-ok.txt');
 
 // Failed-version cooldown: self-update.js writes update-failed.json {version,failedAt}
 // when a genuine update fails its post-update health check and rolls back. We honor
@@ -334,25 +339,54 @@ function refreshLocationIfDue(force) {
 // any state (filtering, unplugged, mid-update). Best-effort and individually time-boxed:
 // a missing or hung script can never fail a poll, it just leaves the hardening for the
 // next hour.
+//
+// EXIT-CODE CONTRACT (plan 0011): each guard now signals its own outcome via its exit code, so
+// we can tell "verified clean" from "reverted a tamper" from "skipped" — execFileSync could not
+// (it throws on ANY nonzero, collapsing 2 and 3 together), so we use spawnSync and read .status:
+//   0 = verified-clean, 2 = harden-failed (a real revert was needed), 3 = skip / N-A.
+// TWO SEPARATE MARKERS: harden-last.txt (the throttle) is stamped BEFORE running exactly as
+// before; guards-ok.txt (the confirm) is stamped AFTER, and ONLY when EVERY first-class guard
+// actually ran and returned exactly 0. guards_checked_at is a machine-WIDE "all watched settings
+// confirmed clean" timestamp (cross-review, plan 0011), so a skip (3), a harden-fail (2), a missing
+// script, or a timeout/signal/spawn error (.status null) ALL veto — an unevaluated guard is not a
+// confirmation. A banca always has a printer + powercfg, so a skip is near-unreachable in the field;
+// when it does happen, "no confirmado" is the honest state, not a fresh green.
 function reassertHardeningIfDue() {
     try {
         const stat = fs.existsSync(HARDEN_MARKER_PATH) ? fs.statSync(HARDEN_MARKER_PATH) : null;
         if (stat && Date.now() - stat.mtimeMs <= HARDEN_MAX_AGE_MS) return;
-        // Stamp BEFORE running: if a script hangs to its timeout we pay that cost once an
-        // hour, not on every 2-min poll. If the stamp itself fails we skip this cycle
-        // rather than risk re-running every poll forever.
+        // Stamp the THROTTLE marker BEFORE running: if a script hangs to its timeout we pay that
+        // cost once an hour, not on every 2-min poll. If the stamp itself fails we skip this cycle
+        // rather than risk re-running every poll forever. (This is UNCHANGED from before.)
         if (!touchHardenMarker()) return;
+        // Run BOTH guards (they re-force their settings regardless of the stamp), tracking whether
+        // EVERY first-class guard actually ran and returned exactly 0 (verified-clean).
+        let allVerifiedClean = true;
         for (const script of [HARDEN_PRINTERS_PS, HARDEN_POWER_PS]) {
+            let status = null;
             try {
-                if (!fs.existsSync(script)) continue;
-                require('child_process').execFileSync(
-                    'powershell',
-                    ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script],
-                    { timeout: 25000, stdio: 'ignore' }
-                );
+                if (fs.existsSync(script)) {
+                    const res = require('child_process').spawnSync(
+                        'powershell',
+                        ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script],
+                        { timeout: 25000, encoding: 'utf-8' }
+                    );
+                    // spawnSync never throws on a nonzero exit — .status is the exit code, or null on
+                    // timeout/signal/spawn error. A missing script leaves status null (it never ran).
+                    status = res.status;
+                }
             } catch (e) {
-                /* per-script best effort — one failing must not skip the other */
+                // spawnSync itself threw (rare) — non-verifying; still let the OTHER guard run.
+                status = null;
             }
+            // STRICT (cross-review): only an explicit 0 counts as confirmation. A skip (3), a
+            // harden-fail (2), a missing script, a timeout/signal/spawn error (null), or any other
+            // code means this guard was NOT confirmed clean this cycle → vetoes the machine-wide stamp.
+            if (status !== 0) allVerifiedClean = false;
+        }
+        // Stamp the confirm marker ONLY when every first-class guard verified clean.
+        if (allVerifiedClean) {
+            touchHardenMarker(HARDEN_OK_MARKER_PATH);
         }
     } catch (e) {
         /* never break a poll over hardening */
@@ -363,16 +397,17 @@ function reassertHardeningIfDue() {
 // the CLAUDE.md disguise note): the install marks agent files +h +s and a plain
 // writeFileSync (CREATE_ALWAYS) EPERMs against those, which would silently freeze the
 // clock at the first stamp and re-run the hardening on EVERY poll. Rewrite in place when
-// the file already exists. Returns whether the stamp landed.
-function touchHardenMarker() {
+// the file already exists. Returns whether the stamp landed. Defaults to the throttle
+// marker; pass HARDEN_OK_MARKER_PATH to stamp the "último OK" confirm marker (plan 0011).
+function touchHardenMarker(markerPath = HARDEN_MARKER_PATH) {
     try {
         const data = new Date().toISOString();
-        if (!fs.existsSync(HARDEN_MARKER_PATH)) {
-            fs.writeFileSync(HARDEN_MARKER_PATH, data, 'utf-8');
+        if (!fs.existsSync(markerPath)) {
+            fs.writeFileSync(markerPath, data, 'utf-8');
             return true;
         }
         const buf = Buffer.from(data, 'utf-8');
-        const fd = fs.openSync(HARDEN_MARKER_PATH, 'r+');
+        const fd = fs.openSync(markerPath, 'r+');
         try {
             fs.writeSync(fd, buf, 0, buf.length, 0);
             fs.ftruncateSync(fd, buf.length);
@@ -400,6 +435,11 @@ function readLocation() {
 // BackToNormal / watchdog before the agent might be killed). Return the ones
 // newer than the cursor timestamp; the caller advances the cursor only AFTER a
 // successful upload so nothing is lost if the poll fails.
+//
+// SETTING DIMENSION (plan 0011, additive + back-compat): a tamper detail may now lead with a
+// structured prefix `setting=<slug> | <human detail>` (slugs are lowercase kebab: printer-keep,
+// power, …). When present we split it out into event.setting and keep detail as just the human
+// text; when absent (every pre-0011 line) event.setting is null and detail is unchanged.
 function readNewTamperEvents() {
     try {
         if (!fs.existsSync(EVENTS_LOG_PATH)) return { events: [], maxTs: null };
@@ -409,6 +449,8 @@ function readNewTamperEvents() {
         const since = sinceIso ? Date.parse(sinceIso) : 0;
         const lines = fs.readFileSync(EVENTS_LOG_PATH, 'utf-8').split(/\r?\n/);
         const re = /^\[([^\]]+)\]\s*tamper\s*(?:\|\s*(.*))?$/i;
+        // Optional leading `setting=<slug> | `: group 1 = slug, group 2 = the remaining human text.
+        const settingRe = /^setting=([a-z0-9-]+)\s*\|\s*(.*)$/;
         const events = [];
         let maxTs = sinceIso || null;
         for (const line of lines) {
@@ -416,7 +458,14 @@ function readNewTamperEvents() {
             if (!m) continue;
             const ts = Date.parse(m[1]);
             if (Number.isNaN(ts) || (since && ts <= since)) continue;
-            events.push({ at: new Date(ts).toISOString(), kind: 'tamper', detail: (m[2] || '').trim() });
+            let detail = (m[2] || '').trim();
+            let setting = null;
+            const sm = detail.match(settingRe);
+            if (sm) {
+                setting = sm[1];
+                detail = sm[2].trim();
+            }
+            events.push({ at: new Date(ts).toISOString(), kind: 'tamper', detail, setting });
             if (!maxTs || ts > Date.parse(maxTs)) maxTs = new Date(ts).toISOString();
         }
         return { events: events.slice(-20), maxTs };
@@ -517,6 +566,12 @@ async function main() {
 
     // Cross-repo contract (plan 0003): the RUNNING agent version, reported on every poll (additive — an
     // old hub ignores it). Read once here; the OTA check below reuses it.
+    //
+    // Cross-repo contract (plan 0011): two MORE additive poll fields ride along below —
+    // `tamper_events[].setting` (per-event setting dimension: printer-keep, power, uninstall, …) and
+    // top-level `body.guards_checked_at` (the hourly "último OK" stamp). Additive in BOTH directions:
+    // an old hub simply ignores them, and a new hub tolerates their absence from an old agent (setting
+    // → null/unknown; guards_checked_at → "never confirmed"). Neither ever breaks the insert.
     const localAgentVersion = readLocalAgentVersion();
 
     const body = {
@@ -536,6 +591,27 @@ async function main() {
     const firstVisit = readFirstVisit();
     if (firstVisit) body.first_visit = firstVisit;
 
+    // Plan 0011 (cross-repo contract, additive): the "último OK" stamp — the mtime of the confirm
+    // marker that reassertHardeningIfDue() wrote the last time every applicable hardening guard
+    // verified clean (default-veto; ~hourly cadence, NOT the 2-min poll). Only-set-when-present,
+    // mirroring os_version/first_visit: absent means "never confirmed clean" (the panel shows that
+    // as such), never a faked recent timestamp.
+    const guardsCheckedAt = (() => {
+        try {
+            if (!fs.existsSync(HARDEN_OK_MARKER_PATH)) return null;
+            // Read the ISO timestamp STORED IN THE FILE, not its mtime (cross-review): an OTA
+            // rollback restores this file from backup, which rewrites the mtime and would fabricate
+            // a fresh "último OK" even though no guard ran clean recently. The written content is the
+            // honest confirmation time; touchHardenMarker writes an ISO string, so parse that.
+            const raw = fs.readFileSync(HARDEN_OK_MARKER_PATH, 'utf-8').trim();
+            const t = Date.parse(raw);
+            return Number.isNaN(t) ? null : new Date(t).toISOString();
+        } catch (e) {
+            return null;
+        }
+    })();
+    if (guardsCheckedAt) body.guards_checked_at = guardsCheckedAt;
+
     // Location: refresh ~hourly (or now, if the hub asked via locate_requested
     // last cycle), then attach the latest fix if we have one.
     const locateForced = fs.existsSync(LOCATE_PENDING_PATH);
@@ -547,6 +623,7 @@ async function main() {
     // Tamper events (uninstall attempt, printer retention attempt, etc.) since the last upload.
     // reassertHardeningIfDue() ran at the TOP of main() (above the not-enrolled guard); its
     // synchronous `tamper` write is therefore already on disk for this read. See plan 0010.
+    // Each event now carries a `setting` dimension (plan 0011, additive — null for pre-0011 lines).
     const tamper = readNewTamperEvents();
     if (tamper.events.length > 0) body.tamper_events = tamper.events;
 

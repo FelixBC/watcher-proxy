@@ -22,8 +22,21 @@
 # (their files are OTA-updated and both tasks already exist) and self-heal a Windows reset.
 # Changing power scheme values needs elevation, which a standard "banca" user
 # does NOT have (so the cashier can't undo it either). Best-effort + idempotent: it
-# never throws, always exits 0, and only writes to the log when it actually changes
-# something. This is the power sibling of HardenPrinters.ps1.
+# never throws, and only writes to the log when it actually changes something. This is
+# the power sibling of HardenPrinters.ps1.
+#
+# -Baseline = "this is the install-time first pass, not a guard hit" — mirrors
+# HardenPrinters.ps1's switch exactly. At install the active scheme may legitimately
+# arrive with Wi-Fi power-saving or sleep-on-AC still on (Windows/driver defaults), so
+# correcting it is expected housekeeping and gets logged as informational
+# ('power-hardened'). EVERY LATER run that has to re-flip it means something reverted
+# it after we'd already hardened it, which is a tamper signal and gets logged as
+# `tamper` so poll-hub.js forwards it to the fleet's red alert (setting=power).
+#
+# Exit-code contract (poll-hub.js reads this): 0 = VERIFIED-CLEAN (read+enforced, or
+# already correct — nothing to change counts as clean), 2 = HARDEN-FAILED (tried to set
+# but the re-read shows it did NOT take), 3 = SKIP/N-A (powercfg absent or the active
+# scheme GUID could not be resolved — the setting could not be evaluated at all).
 #
 # GOLDEN-RULE NOTE: this script is orthogonal to filtering. It NEVER reads or writes
 # ProxyEnable/ProxyServer, never starts/stops the proxy, never touches routing. It only
@@ -34,6 +47,8 @@
 # LOCALIZED (the terminals run Spanish Windows -> "Indice de configuracion..."), so
 # parsing English text would silently never match and never harden. The scheme GUID and
 # the ACSettingIndex/DCSettingIndex DWORDs are locale-independent.
+param([switch]$Baseline)
+
 $ErrorActionPreference = 'SilentlyContinue'
 $BrainDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $EventsPath = Join-Path $BrainDir 'events.log'
@@ -48,7 +63,7 @@ function Write-Event([string]$tag, [string]$detail) {
 
 if (-not (Get-Command powercfg -ErrorAction SilentlyContinue)) {
     Write-Event 'power-guard-skip' 'powercfg no disponible'
-    exit 0
+    exit 3
 }
 
 # Stable, locale-independent GUIDs.
@@ -80,12 +95,15 @@ function Get-RegIndex([string]$scheme, [string]$sub, [string]$setting, [string]$
 # whether we're already hardened -- and a machine that yields no GUID from
 # `powercfg /getactivescheme` wouldn't honor the writes either. Skip silently (no
 # enforce, no log) so the per-logon re-assert can't churn the log with a blind
-# 'power-hardened' every run. Effectively unreachable on healthy Windows (the GUID is
-# locale-independent, so the regex matches in any language).
-if (-not $activeGuid) { exit 0 }
+# 'power-hardened' every run — the setting could not be evaluated at all. Effectively
+# unreachable on healthy Windows (the GUID is locale-independent, so the regex matches
+# in any language).
+if (-not $activeGuid) { exit 3 }
 
-$changed = @()   # settings this run actually FLIPPED (verified by re-read) -> log 'power-hardened'
-$failed  = @()   # settings we TRIED to set but that did NOT take -> log 'power-harden-failed'
+$changed   = @()   # CONFIRMED reverts: prior value was READABLE and non-zero, re-read now 0 -> tamper (non-baseline)
+$corrected = @()   # enforced from an UNKNOWN/unreadable prior value -> informational only, NEVER tamper (cross-review:
+                   # a transient/missing registry read must not fabricate a 'setting=power' tamper / false frequency alert)
+$failed    = @()   # TRIED to set but re-read did NOT confirm 0 -> log 'power-harden-failed' (availability, not tamper)
 
 # Every write below is VERIFIED by re-reading the registry, never trusted. powercfg needs
 # elevation; if this ever runs without it (or a set silently fails) the value stays put.
@@ -98,6 +116,9 @@ $failed  = @()   # settings we TRIED to set but that did NOT take -> log 'power-
 # (the Windows default is a power-saving mode, not max performance).
 $acWifi = Get-RegIndex $activeGuid $WIFI_SUB $WIFI_SET 'ACSettingIndex'
 $dcWifi = Get-RegIndex $activeGuid $WIFI_SUB $WIFI_SET 'DCSettingIndex'
+# Could we actually READ the prior value? If not, enforcing is still right, but we must NOT call it a
+# "revert" (tamper) — the original state was unknown, not confirmed flipped-back-on.
+$wifiReadable = ($acWifi -ne $null) -and ($dcWifi -ne $null)
 if (-not ($acWifi -eq 0 -and $dcWifi -eq 0)) {
     try {
         & powercfg /setacvalueindex SCHEME_CURRENT $WIFI_SUB $WIFI_SET 0 2>&1 | Out-Null
@@ -106,25 +127,49 @@ if (-not ($acWifi -eq 0 -and $dcWifi -eq 0)) {
     } catch {}
     $acNow = Get-RegIndex $activeGuid $WIFI_SUB $WIFI_SET 'ACSettingIndex'
     $dcNow = Get-RegIndex $activeGuid $WIFI_SUB $WIFI_SET 'DCSettingIndex'
-    if ($acNow -eq 0 -and $dcNow -eq 0) { $changed += 'wifi=max-perf(AC+DC)' }
+    if ($acNow -eq 0 -and $dcNow -eq 0) {
+        if ($wifiReadable) { $changed += 'wifi=max-perf(AC+DC)' }   # prior known non-zero -> real revert
+        else { $corrected += 'wifi=max-perf(AC+DC)' }              # prior unknown -> enforce, no tamper
+    }
     else { $failed += 'wifi' }
 }
 
 # --- Never sleep on AC (battery sleep left untouched by design) ---
 # `/change standby-timeout-ac` targets ONLY the AC index of the active scheme.
 $acSleep = Get-RegIndex $activeGuid $SLEEP_SUB $SLEEP_SET 'ACSettingIndex'
+$sleepReadable = ($acSleep -ne $null)
 if ($acSleep -ne 0) {   # null (unknown) or non-zero -> enforce; exactly 0 -> already never, skip
     try {
         & powercfg /change standby-timeout-ac 0 2>&1 | Out-Null
     } catch {}
-    if ((Get-RegIndex $activeGuid $SLEEP_SUB $SLEEP_SET 'ACSettingIndex') -eq 0) { $changed += 'no-sleep-ac' }
+    if ((Get-RegIndex $activeGuid $SLEEP_SUB $SLEEP_SET 'ACSettingIndex') -eq 0) {
+        if ($sleepReadable) { $changed += 'no-sleep-ac' }   # prior known non-zero -> real revert
+        else { $corrected += 'no-sleep-ac' }                # prior unknown -> enforce, no tamper
+    }
     else { $failed += 'no-sleep-ac' }
 }
 
 if ($changed.Count -gt 0) {
-    Write-Event 'power-hardened' ($changed -join ', ')
+    if ($Baseline) {
+        Write-Event 'power-hardened' ($changed -join ', ')
+    } else {
+        # `tamper` is the tag poll-hub.js lifts into tamper_events (cross-repo contract) → fleet.
+        # `setting=power` is the dimension the fleet groups on. ONLY confirmed reverts (prior value
+        # readable AND non-zero) reach here — enforced-from-unknown goes to $corrected below.
+        Write-Event 'tamper' ("setting=power | revert de energia/Wi-Fi re-forzado: " + ($changed -join ', '))
+    }
 }
+# Enforced from an unknown/unreadable prior state: informational, NEVER a tamper — a transient
+# registry-read miss must not fabricate a false 'setting=power' frequency alert (cross-review).
+if ($corrected.Count -gt 0) {
+    Write-Event 'power-hardened' ('estado previo desconocido, forzado: ' + ($corrected -join ', '))
+}
+# A power set that did NOT take is an AVAILABILITY issue (the machine may sleep / stop reporting) —
+# surfaced by the fleet's existing stale / "sin reportar" signal, NOT a ticket-retention theft. So it
+# stays a local log line and does NOT emit a tamper (unlike the printer guard), keeping power off the
+# red frequency ladder — consistent with M4 (power = resilience, caps at amber, not theft).
 if ($failed.Count -gt 0) {
     Write-Event 'power-harden-failed' ('no aplico (elevacion?): ' + ($failed -join ', '))
+    exit 2
 }
 exit 0

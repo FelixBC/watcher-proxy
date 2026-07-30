@@ -42,3 +42,6 @@ WatcherBrain/staging.flag
 WatcherBrain/selftest-state.json
 WatcherBrain/selftest.lock
 WatcherBrain/_backup_*/
+# Plan 0011 "Settings vigilados" — per-machine runtime marker poll-hub.js writes after a
+# guard re-check confirms everything OK. Runtime state, never commit or ship in the bundle.
+WatcherBrain/guards-ok.txt
