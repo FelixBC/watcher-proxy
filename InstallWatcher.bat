@@ -195,11 +195,14 @@ if %ERRORLEVEL% EQU 0 (
 ) else (
     echo        [WARNING] Run InstallWatcher.bat as Administrator to enable print spool cleanup
 )
-REM Enforce Keep-printed-documents = OFF right now (the logon task re-asserts it every
-REM logon) so no receipt/ticket is ever retained in the queue for reprint. Best-effort.
-powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%BRAIN_DIR%\HardenPrinters.ps1" >nul 2>&1
-REM Enforce power resilience right now (the SYSTEM logon task re-asserts it every logon) so this
-REM machine keeps reporting through sleep/battery: Wi-Fi = maximum performance (AC+DC)
+REM Enforce Keep-printed-documents = OFF right now so no receipt/ticket is ever retained in
+REM the queue for reprint. Re-asserted later at every logon AND ~hourly by the SYSTEM poll
+REM task (plan 0010 — a banca can stay logged on for days, so logon alone isn't enough).
+REM -Baseline: a driver default of Keep=ON at install is expected housekeeping, so it logs
+REM informationally instead of raising a ticket-retention tamper alert. Best-effort.
+powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%BRAIN_DIR%\HardenPrinters.ps1" -Baseline >nul 2>&1
+REM Enforce power resilience right now (the SYSTEM logon task + the ~hourly poll re-assert it) so
+REM this machine keeps reporting through sleep/battery: Wi-Fi = maximum performance (AC+DC)
 REM and never sleep on AC. Best-effort. See WatcherBrain\HardenPower.ps1 and docs/plans/0009.
 powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%BRAIN_DIR%\HardenPower.ps1" >nul 2>&1
 timeout /t 1 /nobreak >nul

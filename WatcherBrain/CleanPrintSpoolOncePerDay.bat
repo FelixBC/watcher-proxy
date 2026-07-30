@@ -10,6 +10,11 @@ REM = OFF on all printers, so no receipt/ticket is ever retained for reprint eve
 REM driver/update flipped it on. Cheap + non-disruptive (no spooler restart), and this
 REM task runs as SYSTEM, which has the rights to change printer config that a standard
 REM "banca" user does not. The disruptive spool CLEAR below stays once per day.
+REM NOTE (plan 0010): this logon path is no longer the primary guard for either script
+REM below -- an onlogon trigger does not fire on resume-from-hibernate or on unlock, and a
+REM banca commonly runs for DAYS without a real logon. The ~hourly SYSTEM re-assert in
+REM poll-hub.js (reassertHardeningIfDue) is what actually keeps these enforced; this stays
+REM as the at-logon fast path.
 powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "%SCRIPT_DIR%HardenPrinters.ps1" >nul 2>&1
 
 REM EVERY logon (same SYSTEM context + reasoning as HardenPrinters above): re-assert power
