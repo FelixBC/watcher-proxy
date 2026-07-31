@@ -1,6 +1,11 @@
 # Plan 0006 — Fix del loop de self-update (P0 del OTA 1.0.28)
 
-Estado: **LOCKED v2 — aprobado por Felix 2026-07-24 (AC4 v1 diferido).** El repro empírico
+Estado: **CONSTRUIDO Y ENVIADO — v1.0.29** (commit `10f7dd6`). El AC4 v1 diferido lo cerró el plan
+`0008` (piso fail-open + last-known-good, construido y verificado 2026-07-26) y todo el camino de
+actualización quedó luego superado por `0007` (blue-green zero-gap). Se conserva por el recorrido
+diagnóstico; **no es trabajo activo**. `VERSION` manda sobre el estado real del OTA.
+
+Estado histórico: **LOCKED v2 — aprobado por Felix 2026-07-24 (AC4 v1 diferido).** El repro empírico
 de hoy REFUTÓ el mecanismo asumido del statement v1 (retención de puerto por `Stop-Process -Force`).
 El contrato operativo es la **RE-DEFINICIÓN v2** de abajo; el statement v1 se conserva como histórico
 del recorrido diagnóstico. Gear: **FULL-ORCHESTRATOR** (sin cambio). Siguiente fase tras la aprobación:
