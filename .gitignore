@@ -45,3 +45,8 @@ WatcherBrain/_backup_*/
 # Plan 0011 "Settings vigilados" — per-machine runtime marker poll-hub.js writes after a
 # guard re-check confirms everything OK. Runtime state, never commit or ship in the bundle.
 WatcherBrain/guards-ok.txt
+# Plan 0012 — per-machine "hibernate has been forced here at least once" marker written by
+# HardenPower.ps1. CRITICAL that it never ships in the bundle: a fresh install carrying a
+# stray flag would arrive pre-baselined and swallow its FIRST real hibernate revert as
+# housekeeping instead of reporting it as tamper.
+WatcherBrain/hibernate-baselined.flag

@@ -1,14 +1,26 @@
 # Keep a banca REPORTING to the hub through every power state it passes through
-# (AC, battery, sleep, wake). Two Windows defaults make a machine go silent even
+# (AC, battery, sleep, wake). THREE Windows defaults make a machine go silent even
 # though internet and the filter are fine:
 #   1. Wi-Fi radio power-saving naps the adapter (esp. on battery) -> polls stop.
 #   2. Sleep-on-AC suspends a plugged terminal -> it disappears until someone
 #      wiggles the mouse.
+#   3. Hibernate-on-AC (default 3h idle) drops a plugged terminal to S4 -> same
+#      disappearance, and this one survives everything short of a keypress.
 # So force, on the ACTIVE power scheme:
 #   - Wireless Adapter Power Saving Mode = Maximum Performance, for BOTH AC and DC.
 #   - Standby (sleep) timeout on AC = 0 (never). Battery sleep is left ALONE on
 #     purpose (don't accelerate a dying battery; the golden rule + resume handling
 #     cover the wake).
+#   - Hibernate timeout on AC = 0 (never), battery likewise left ALONE (plan 0012).
+#
+# Why BOTH sleep and hibernate (plan 0012 — do not "simplify" this back to one):
+# STANDBYIDLE and HIBERNATEIDLE are SEPARATE settings. On a Modern Standby (S0)
+# machine the classic "Sleep after" is inert, and what actually drops the box to S4
+# is HIBERNATEIDLE — the "Doze to Hibernate" transition. Plan 0009 set only the
+# standby knob, so from v1.0.31 to v1.0.33 every plugged banca still went dark after
+# 3h idle; measured on the test PC 2026-07-31 (last activity 19:12 -> hibernate 22:13,
+# exactly the 10800s default, 13h without a poll). Setting one without the other
+# looks correct and fixes nothing on S0 hardware.
 #
 # Always runs ELEVATED (powercfg needs it): at install from InstallWatcher (the elevated
 # installer / Administrators), re-asserted every logon AS SYSTEM by the "WinConfig
@@ -71,6 +83,12 @@ $WIFI_SUB  = '19cbb8fa-5279-450e-9fac-8a3d5fedd0c1'  # Wireless Adapter Settings
 $WIFI_SET  = '12bbebe6-58d6-4636-95bb-3217ef867c1a'  # Power Saving Mode (0 = Maximum Performance)
 $SLEEP_SUB = '238c9fa8-0aad-41ed-83f4-97be242c8f20'  # Sleep
 $SLEEP_SET = '29f6c1db-86da-48c5-9fdb-f2b67b1f44da'  # Sleep after (STANDBYIDLE), seconds; 0 = never
+$HIBER_SET = '9d7815a6-7ee4-497e-8888-515a05f02364'  # Hibernate after (HIBERNATEIDLE), seconds; 0 = never
+
+# Per-machine "we have already forced hibernate on this box at least once" marker (plan 0012).
+# Gitignored runtime state: it must never travel in the /descargar bundle, or a fresh install
+# would arrive pre-baselined and swallow the FIRST real revert as housekeeping.
+$HiberBaselinePath = Join-Path $BrainDir 'hibernate-baselined.flag'
 
 # Resolve the active scheme GUID. `powercfg /getactivescheme` prints a localized name
 # but the GUID itself is not localized, so match it by shape.
@@ -91,6 +109,27 @@ function Get-RegIndex([string]$scheme, [string]$sub, [string]$setting, [string]$
     } catch { return $null }
 }
 
+function Set-HiberBaseline {
+    # Stamp "this machine has had hibernate forced at least once" (plan 0012). Returns $true if
+    # the marker is present afterwards, $false if the write failed.
+    #
+    # A failure here is NOT cosmetic and must not pass silently (codex 0012 review, P2-1): with no
+    # marker, the NEXT genuine revert is re-classified as a first touch and never reaches the fleet
+    # as tamper — the guard would keep reporting "clean" while having quietly lost its ability to
+    # detect the thing it exists to detect. So the caller routes a failure into the exit-2 path,
+    # exactly like a powercfg write that did not take. Same doctrine as the rest of this script:
+    # a broken deploy must be VISIBLE in the log, never a silent false success.
+    try {
+        if (-not (Test-Path $HiberBaselinePath -PathType Leaf)) {
+            Set-Content -Path $HiberBaselinePath -Value ((Get-Date).ToUniversalTime().ToString('o')) -ErrorAction Stop
+        }
+        # Verified by RE-READING, never trusted. -PathType Leaf on purpose: a bare Test-Path also
+        # answers $true for a DIRECTORY of that name, which would let a non-file masquerade as a
+        # valid marker and silently re-arm the first-touch rule forever.
+        return (Test-Path $HiberBaselinePath -PathType Leaf)
+    } catch { return $false }
+}
+
 # If the active scheme GUID couldn't be resolved we can't read the registry to know
 # whether we're already hardened -- and a machine that yields no GUID from
 # `powercfg /getactivescheme` wouldn't honor the writes either. Skip silently (no
@@ -104,6 +143,8 @@ $changed   = @()   # CONFIRMED reverts: prior value was READABLE and non-zero, r
 $corrected = @()   # enforced from an UNKNOWN/unreadable prior value -> informational only, NEVER tamper (cross-review:
                    # a transient/missing registry read must not fabricate a 'setting=power' tamper / false frequency alert)
 $failed    = @()   # TRIED to set but re-read did NOT confirm 0 -> log 'power-harden-failed' (availability, not tamper)
+$markerFailed = $false   # plan 0012: the baseline marker could not be written -> future revert detection is
+                         # degraded, so this must NOT report clean (codex 0012 review, P2-1)
 
 # Every write below is VERIFIED by re-reading the registry, never trusted. powercfg needs
 # elevation; if this ever runs without it (or a set silently fails) the value stays put.
@@ -149,6 +190,50 @@ if ($acSleep -ne 0) {   # null (unknown) or non-zero -> enforce; exactly 0 -> al
     else { $failed += 'no-sleep-ac' }
 }
 
+# --- Never hibernate on AC (battery hibernation left untouched by design) ---
+# `/change hibernate-timeout-ac` targets ONLY the AC index of the active scheme, exactly like
+# its standby sibling above. This is the knob plan 0009 missed; see the Modern Standby note in
+# the header for why setting standby alone fixed nothing on S0 hardware.
+#
+# FIRST-TOUCH RULE (plan 0012). On a machine whose HIBERNATEIDLE is PERSISTED in the registry
+# (an OEM image, or an admin who opened the power options), the first run of this block sees a
+# READABLE NON-ZERO prior and the classification below would read it as "someone reverted it"
+# and emit a `tamper`. poll-hub.js invokes this script WITHOUT -Baseline (only InstallWatcher.bat
+# passes it), so shipping that naively would raise a red MANIPULADA on those machines the same
+# night the fix lands — the exact false positive this change exists to remove. So: the first time
+# we ever force this knob on a given box is housekeeping; only a revert AFTER that is tamper. The
+# marker, not -Baseline, is what separates them, because the OTA'd machines that need the
+# distinction are precisely the ones that never see -Baseline.
+#
+# MEASURED, so nobody re-derives it (test PC, 2026-07-31): the active scheme's Sleep subgroup had
+# only ONE child, 29f6c1db (STANDBYIDLE=0, written by plan 0009). HIBERNATEIDLE had NO registry
+# entry at all — the 3h that `powercfg /q` reports there is the scheme's INHERITED DEFAULT, not a
+# persisted value. On such a box Get-RegIndex returns $null, $hiberReadable is $false, and the
+# pre-existing $corrected path would already have prevented the false tamper on its own. The
+# marker therefore protects the persisted-value subset, not the whole fleet.
+$hiberBaselined = Test-Path $HiberBaselinePath -PathType Leaf
+$acHiber = Get-RegIndex $activeGuid $SLEEP_SUB $HIBER_SET 'ACSettingIndex'
+$hiberReadable = ($acHiber -ne $null)
+if ($acHiber -ne 0) {   # null (unknown) or non-zero -> enforce; exactly 0 -> already never, skip
+    try {
+        & powercfg /change hibernate-timeout-ac 0 2>&1 | Out-Null
+    } catch {}
+    if ((Get-RegIndex $activeGuid $SLEEP_SUB $HIBER_SET 'ACSettingIndex') -eq 0) {
+        # Real revert only if the prior value was READABLE, non-zero AND this box was already
+        # baselined. First touch (or an unreadable prior) is informational, never tamper.
+        if ($hiberReadable -and $hiberBaselined) { $changed += 'no-hibernate-ac' }
+        else { $corrected += 'no-hibernate-ac' }
+        if (-not (Set-HiberBaseline)) { $markerFailed = $true }
+    }
+    else { $failed += 'no-hibernate-ac' }
+}
+elseif (-not $hiberBaselined) {
+    # Already 0 before we ever touched it (an admin or the OEM image got there first). Stamp the
+    # marker anyway, or the NEXT revert would be swallowed as a first touch and never reach the
+    # fleet. Writes no log line on success, so idempotency (AC3) holds.
+    if (-not (Set-HiberBaseline)) { $markerFailed = $true }
+}
+
 if ($changed.Count -gt 0) {
     if ($Baseline) {
         Write-Event 'power-hardened' ($changed -join ', ')
@@ -170,6 +255,14 @@ if ($corrected.Count -gt 0) {
 # red frequency ladder — consistent with M4 (power = resilience, caps at amber, not theft).
 if ($failed.Count -gt 0) {
     Write-Event 'power-harden-failed' ('no aplico (elevacion?): ' + ($failed -join ', '))
+    exit 2
+}
+# The power VALUES may all be correct and still leave this guard half-built: without its baseline
+# marker, the next genuine hibernate revert would be misread as a first touch and never reported
+# (plan 0012 / codex P2-1). That is a degraded guard, not a clean one, so it takes the same exit-2
+# path — poll-hub.js then refuses to stamp guards-ok.txt and the machine stops claiming "verified".
+if ($markerFailed) {
+    Write-Event 'power-harden-failed' 'marcador hibernate-baselined no se pudo escribir: la deteccion de un revert futuro queda degradada'
     exit 2
 }
 exit 0
