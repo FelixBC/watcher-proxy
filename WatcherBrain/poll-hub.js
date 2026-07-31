@@ -56,6 +56,17 @@ const HARDEN_MARKER_PATH = path.join(BRAIN_DIR, 'harden-last.txt');
 // guards actually verified clean this cycle (default-veto — see reassertHardeningIfDue). Its mtime
 // is the "último OK" reported as body.guards_checked_at.
 const HARDEN_OK_MARKER_PATH = path.join(BRAIN_DIR, 'guards-ok.txt');
+// Plan 0013: the print-signal harvest. HardenPrinters.ps1 turns the Windows print log ON;
+// THIS file owns its cursor exclusively, exactly as it owns tamper-cursor.txt above.
+// That ownership is not tidiness. If the guard (~55 min) wrote the anchor and the harvest
+// (~2 min) read it, ~27 polls would run with the cursor absent — and "absent" taken as 0
+// dumps the whole pre-existing log, days of old prints, into the hub the night this ships.
+const PRINT_LOG_CHANNEL = 'Microsoft-Windows-PrintService/Operational';
+const PRINT_CURSOR_PATH = path.join(BRAIN_DIR, 'print-cursor.txt');
+// "We already reported the harvest as broken" — so a permanent failure costs ONE line in the
+// shared events.log instead of 720 a day. Cleared as soon as a harvest works again.
+const PRINT_FAIL_FLAG_PATH = path.join(BRAIN_DIR, 'print-harvest-failed.flag');
+const PRINT_JOBS_MAX = 50;
 
 // Failed-version cooldown: self-update.js writes update-failed.json {version,failedAt}
 // when a genuine update fails its post-update health check and rolls back. We honor
@@ -474,6 +485,287 @@ function readNewTamperEvents() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// PRINT SIGNAL (plan 0013, cross-repo contract). Windows records every printed document as
+// event 307 of Microsoft-Windows-PrintService/Operational — printer, document, pages, time.
+// The channel ships DISABLED (the Windows default), which is why it held nothing;
+// HardenPrinters.ps1 turns it on and re-asserts it, and this harvests what the hub hasn't seen.
+//
+// The three facts below were MEASURED on the test PC (2026-07-31), not assumed — the whole plan
+// exists because the previous "print signal" was written from a comment nobody ever checked:
+//   · `Get-WinEvent -FilterHashtable` does NOT accept EventRecordID, so a cursor filter has to be
+//     XPath. wevtutil is also a native binary (~10-30ms) rather than a PowerShell start-up
+//     (~300-700ms), and this runs every ~2 min on every banca.
+//   · `/rd:false` returns OLDEST-first, and that matters more than it looks: newest-first with a
+//     cap would hand us the 200 newest of a backlog, and moving the cursor past them would bury
+//     the older ones FOREVER, with no error anywhere.
+//   · `Pages printed` is 0 on the EPSON thermal for a ticket that physically came out. The unit
+//     is therefore the EVENT — one 307 is one printed document — never the page count.
+//
+// What deliberately does NOT travel: the document name (Param2) and the user (Param3). A ticket
+// name can carry a customer's data and this repo is public; printer + time + count already answer
+// both questions that matter — was a human there, and did a copy go to another printer.
+function wevtutilRun(args) {
+    try {
+        // spawnSync, not execFileSync: a nonzero exit here is information, not an exception.
+        // 3s, not 10: the measured read is 10-30 ms, and on the STAGING machine up to four of these
+        // stack on top of the poll jitter and the self-test's own cutover cycle, inside the task's
+        // 5-minute ExecutionTimeLimit. A generous-looking ceiling was quietly eating that budget.
+        const res = require('child_process').spawnSync('wevtutil.exe', args, {
+            encoding: 'utf-8', windowsHide: true, timeout: 3000,
+        });
+        if (!res || res.status !== 0) return null;   // null = the command really failed
+        return res.stdout || '';                     // '' = it ran and matched nothing
+    } catch (e) {
+        return null;
+    }
+}
+
+// The health probe deliberately uses `gl`/`gli` and NOT the harvest query. An invalid XPath exits
+// 0 with EMPTY output (measured), so a probe built on the same query would report "log fine, zero
+// prints" while broken — certifying itself with its own output. These are different commands with
+// a different failure mode, so they can contradict the harvest instead of echoing it.
+function readPrintLogState() {
+    const gl = wevtutilRun(['gl', PRINT_LOG_CHANNEL]);
+    const gli = wevtutilRun(['gli', PRINT_LOG_CHANNEL]);
+    if (gl === null || gli === null) return null;
+    // Case-insensitive on purpose: the PowerShell side of this same read (HardenPrinters.ps1's
+    // Get-PrintLogEnabled) is insensitive by default, and two readers of one wevtutil field
+    // disagreeing on case would mean the guard keeps working while the harvest reports broken
+    // forever. wevtutil emits lowercase today; this costs nothing and removes the divergence.
+    const enabled = /^\s*enabled:\s*(true|false)\s*$/im.exec(gl);
+    const records = /^\s*numberOfLogRecords:\s*(\d+)\s*$/im.exec(gli);
+    if (!enabled || !records) return null;
+    return { enabled: enabled[1].toLowerCase() === 'true', records: Number(records[1]) };
+}
+
+// The tip = the highest EventRecordID currently in the channel. It MUST come from querying the
+// newest event: `gli`'s oldestRecordNumber reported 1 while the live records were 11-15 (measured
+// right after a `wevtutil cl`), so deriving the cursor from that field would silently re-send.
+function readPrintLogTip() {
+    const xml = wevtutilRun(['qe', PRINT_LOG_CHANNEL, '/c:1', '/rd:true', '/f:xml']);
+    if (xml === null) return null;
+    const m = /<EventRecordID>(\d+)<\/EventRecordID>/.exec(xml);
+    return m ? Number(m[1]) : null;   // null here = ran fine but returned nothing
+}
+
+// Unreadable is ABSENT, never 0. The reflex idiom `parseInt(raw) || 0` is a trap in this one
+// spot: an empty file, a NaN or a stray BOM would all collapse to 0, and cursor 0 means "send
+// the entire log". Note Number('') === 0, so the empty case has to be caught before the coercion.
+function readPrintCursor() {
+    try {
+        if (!fs.existsSync(PRINT_CURSOR_PATH)) return null;
+        const raw = fs.readFileSync(PRINT_CURSOR_PATH, 'utf-8').trim();
+        if (!raw) return null;
+        const n = Number(raw);
+        if (Number.isFinite(n) && n >= 0) return Math.floor(n);
+        // Garbage in the file (half-written, hand-edited) is treated as absent, which re-anchors to
+        // the tip and DISCARDS whatever had not been posted. That is the safe direction, but it is
+        // indistinguishable from a legitimate debut unless it leaves a crumb. The crumb is written
+        // by the caller and ONLY once the re-anchor actually landed — otherwise a file that is both
+        // unreadable AND unwritable would log this every ~2 min forever. Content never logged.
+        cursorWasInvalid = true;
+        return null;
+    } catch (e) {
+        return null;
+    }
+}
+
+function writePrintCursor(record) {
+    try { fs.writeFileSync(PRINT_CURSOR_PATH, String(record), 'utf-8'); return true; }
+    catch (e) { return false; }
+}
+
+function decodeXmlText(s) {
+    return String(s)
+        .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+        .replace(/&amp;/g, '&');
+}
+
+// A permanent harvest failure must be reported ONCE, not every ~2 min. events.log is shared,
+// capped at 128 KB / 600 lines by event-log.js, AND it is what body.diagnostics uploads — 720
+// identical lines a day would evict the internet/update/tamper history inside two days and leave
+// diagnostics saying nothing but this. So: log the TRANSITION, mirroring logInternetTransition.
+let harvestFailedThisPass = false;
+let cursorWasInvalid = false;
+
+function reportHarvestFailure(detail, tag) {
+    harvestFailedThisPass = true;
+    try {
+        if (fs.existsSync(PRINT_FAIL_FLAG_PATH)) return;
+        fs.writeFileSync(PRINT_FAIL_FLAG_PATH, new Date().toISOString(), 'utf-8');
+    } catch (e) {
+        // If the marker can NEVER be written the throttle is gone and this costs a line per pass.
+        // Self-limiting in practice: a BRAIN_DIR that rejects this write also rejects the
+        // appendFileSync into events.log, so the flood silences itself.
+    }
+    appendEvent(tag || 'print-harvest-failed', detail);
+}
+
+// Guarded by the pass flag on purpose. Clearing it while this same pass has already reported a
+// failure would re-arm the once-only rule and put us straight back to a line every ~2 min — which
+// is how the FIRST version of this fix broke itself: it cleared on "the probe answered", then a
+// later step (an unwritable cursor) failed and logged again, forever.
+function clearHarvestFailure() {
+    if (harvestFailedThisPass) return;
+    try { if (fs.existsSync(PRINT_FAIL_FLAG_PATH)) fs.unlinkSync(PRINT_FAIL_FLAG_PATH); } catch (e) {}
+}
+
+function harvestPrintJobs() {
+    // Health is reported even when the probe fails — with nulls, so the hub sees a HOLE instead of
+    // nothing at all. Sending no field on the loudest failure would be the exact opposite of the
+    // point: "this channel holds 500 records and we have reported 0 prints" has to stay visible.
+    const blind = { jobs: [], maxRecord: null, health: { enabled: null, tip: null, cursor: null } };
+    harvestFailedThisPass = false;
+    cursorWasInvalid = false;
+    try {
+        const state = readPrintLogState();
+        if (!state) {
+            reportHarvestFailure('no se pudo leer el estado del canal de impresion');
+            return blind;
+        }
+
+        const tip = readPrintLogTip();
+        if (state.records > 0 && tip === null) {
+            // Non-empty log, yet the tip query returned nothing => the query mechanism is broken,
+            // not the day. This is the ONLY way to tell those two apart, because a malformed XPath
+            // exits 0 with empty output. Anchor nothing, harvest nothing, and report it.
+            reportHarvestFailure('el canal tiene registros pero la consulta no devuelve ninguno');
+            return blind;
+        }
+        // NOT cleared here. Clearing on "the probe answered" would re-arm the one-line rule on every
+        // pass, so a failure further down (an unwritable cursor, a dead 307 query) would log again
+        // every ~2 min — exactly the flood this marker exists to prevent. Cleared only where the
+        // harvest actually got through.
+
+        const health = { enabled: state.enabled, tip, cursor: null };
+        const cursor = readPrintCursor();
+
+        // DEBUT / re-anchor. Absent (or unreadable) cursor => anchor to the TIP and post ZERO
+        // events, so a machine that receives this by OTA never ships days of pre-existing prints
+        // (the plan's non-goal "no recompactar historia" — green starts existing forwards).
+        // A cursor ABOVE the tip means the log was cleared or its ids reset; re-anchoring costs
+        // that window's prints, which under-counts — the safe direction — and never invents any.
+        if (cursor === null || (tip !== null && cursor > tip)) {
+            // ANCHOR TO THE OBSERVED TIP, never to a record COUNT. On the test PC a disabled channel
+            // still reported its 5 records and its tip stayed queryable, so the two probes agree
+            // there — but `gli` was already caught lying on this very channel (`oldestRecordNumber`
+            // said 1 while the live records were 11-15), so its numbers are not something to gate
+            // the anchor on. If the two ever disagree, the resolution has to be under-counting,
+            // which costs a few prints; resolving toward 0 means "send the whole log", which paints
+            // the fleet green on debut night.
+            const anchor = tip === null ? 0 : tip;
+            // This write is an ANCHOR, not a delivery receipt, so it is NOT gated on a successful
+            // post: there is nothing being posted. The "advance only after the hub took it" rule
+            // applies to the harvest below.
+            if (writePrintCursor(anchor)) {
+                health.cursor = anchor;
+                if (cursorWasInvalid) {
+                    appendEvent('print-cursor-invalid', 'cursor de impresion ilegible; re-anclado a la punta');
+                }
+                clearHarvestFailure();
+            } else {
+                // An unwritable cursor re-anchors every single pass and therefore posts nothing,
+                // FOREVER, while looking exactly like a banca that does not print. Leave cursor
+                // null so the hub can see the hole. (EPERM here is not hypothetical: installed
+                // files carry +h +s and writeFileSync CREATE_ALWAYS throws on them.)
+                reportHarvestFailure('no se pudo escribir el cursor de impresion');
+            }
+            return { jobs: [], maxRecord: null, health };
+        }
+        health.cursor = cursor;
+
+        if (tip === null || tip <= cursor) {
+            clearHarvestFailure();   // nothing new to fetch is a healthy harvest, not a broken one
+            return { jobs: [], maxRecord: null, health };
+        }
+
+        // Constant template; only a validated finite integer is interpolated.
+        const xml = wevtutilRun([
+            'qe', PRINT_LOG_CHANNEL,
+            `/q:*[System[(EventID=307) and (EventRecordID>${cursor})]]`,
+            '/f:xml', `/c:${PRINT_JOBS_MAX}`, '/rd:false',
+        ]);
+        if (xml === null) {
+            reportHarvestFailure('la consulta de eventos 307 fallo');
+            return { jobs: [], maxRecord: null, health };
+        }
+
+        const jobs = [];
+        let maxRecord = null;
+        let maxSeen = null;    // highest record id we LOOKED at, parsed or not — see below
+        let unreadable = 0;    // 307s we saw and could NOT turn into a job
+        for (const chunk of xml.split('</Event>')) {
+            const rec = /<EventRecordID>(\d+)<\/EventRecordID>/.exec(chunk);
+            if (rec) {
+                const seen = Number(rec[1]);
+                if (Number.isFinite(seen) && (maxSeen === null || seen > maxSeen)) maxSeen = seen;
+            }
+            const when = /<TimeCreated\s+SystemTime='([^']+)'/.exec(chunk);
+            const body = /<DocumentPrinted[^>]*>([\s\S]*?)<\/DocumentPrinted>/.exec(chunk);
+            if (!rec) continue;                    // trailing fragment of the split, not an event
+            if (!when || !body) { unreadable++; continue; }
+            const param = (n) => {
+                const m = new RegExp(`<Param${n}>([\\s\\S]*?)</Param${n}>`).exec(body[1]);
+                return m ? decodeXmlText(m[1]) : null;
+            };
+            const at = Date.parse(when[1]);
+            const printer = param(5);
+            if (Number.isNaN(at) || !printer) { unreadable++; continue; }
+            // Number(null) is 0, not NaN — so reading a missing Param through Number() straight
+            // would report a confident 0 bytes instead of "unknown". Same coercion trap the cursor
+            // reader guards against, in a field where it merely lies quietly.
+            const rawBytes = param(7);
+            const rawJob = param(1);
+            const bytes = rawBytes === null ? null : Number(rawBytes);
+            const job = rawJob === null ? null : Number(rawJob);
+            const record = Number(rec[1]);
+            jobs.push({
+                at: new Date(at).toISOString(),
+                printer: printer.slice(0, 120),
+                bytes: Number.isFinite(bytes) ? bytes : null,
+                job: Number.isFinite(job) ? job : null,
+                record,
+            });
+            if (maxRecord === null || record > maxRecord) maxRecord = record;
+        }
+
+        // GUARANTEE OF PROGRESS. If every event in this window failed to parse, `jobs` is empty, so
+        // nothing is posted, so the cursor never advances — and because /rd:false hands back the
+        // OLDEST first, those same unparseable events block everything behind them forever. Step
+        // over what we have already judged unreportable; that costs those events and nothing else.
+        if (jobs.length === 0 && maxSeen !== null && maxSeen > cursor) {
+            if (writePrintCursor(maxSeen)) {
+                health.cursor = maxSeen;
+                // Counted, not subtracted: `maxSeen - cursor` is a span of record ids, and this
+                // channel writes FIVE events per job (800/801/842/805/307), so that arithmetic
+                // would report ~5x what was actually dropped — on the one line a human uses to
+                // judge how bad a broken harvest is. Routed through the throttle because a broken
+                // parser makes this fire on every print, forever.
+                reportHarvestFailure(`${unreadable} evento(s) 307 ilegibles omitidos`, 'print-harvest-skipped');
+            } else {
+                reportHarvestFailure('no se pudo escribir el cursor de impresion');
+            }
+            return { jobs, maxRecord, health };
+        }
+        // NOT cleared when we are handing jobs upward: this pass does not end here, it ends in
+        // main() once the post returned 2xx AND the cursor write landed. Clearing here would wipe
+        // the marker before a post-cursor failure could repeat — putting the every-2-min flood
+        // back through the exact door it already came through once.
+        if (jobs.length === 0) clearHarvestFailure();
+        return { jobs, maxRecord, health };
+    } catch (e) {
+        // Never let this take the poll down with it: everything else in the body still has to ship.
+        // But do NOT go quiet: this is the one module whose whole thesis is that silence is the bug,
+        // and a deterministic throw here would blind a machine forever without a single line.
+        // e.message can carry an agent path at worst, never ticket data.
+        reportHarvestFailure('excepcion en la cosecha: ' + (e && e.message));
+        return { jobs: [], maxRecord: null, health: { enabled: null, tip: null, cursor: null } };
+    }
+}
+// ---------------------------------------------------------------------------
+
 // The first allowed page of the day (written by the proxy). Sent as {host, at}.
 function readFirstVisit() {
     try {
@@ -627,6 +919,21 @@ async function main() {
     const tamper = readNewTamperEvents();
     if (tamper.events.length > 0) body.tamper_events = tamper.events;
 
+    // Printed documents since the last upload (plan 0013, cross-repo contract — ADDITIVE in both
+    // directions: an old hub ignores both fields, and a new hub tolerates an old agent that sends
+    // neither, treating their absence as "no proof", never as "it printed"). `print_log` is the
+    // health probe: it makes "this channel holds 500 records and we have reported 0 prints"
+    // visible from the hub instead of silent, which a column that only ever shows what we wrote
+    // could never do.
+    // `print_log` is ALWAYS sent (every path returns a health object) — its own fields carry the
+    // "we could not tell" case. `tip: null` means two different things and the hub tells them apart
+    // by `enabled`: enabled null => the probe itself failed; enabled boolean with tip null => the
+    // channel is genuinely empty. That rule is consumed in the other repo, so it also lives in
+    // this repo's CLAUDE.md next to the field description.
+    const print = harvestPrintJobs();
+    if (print.jobs.length > 0) body.print_jobs = print.jobs;
+    body.print_log = print.health;
+
     // If the hub asked for diagnostics last time, attach the event-log tail now.
     const diagPending = fs.existsSync(DIAG_PENDING_PATH);
     if (diagPending) {
@@ -670,6 +977,21 @@ async function main() {
     // re-sends the events next time instead of dropping them.
     if (tamper.events.length > 0 && tamper.maxTs) {
         try { fs.writeFileSync(TAMPER_CURSOR_PATH, tamper.maxTs, 'utf-8'); } catch (e) {}
+    }
+    // Same rule for the print cursor, and it reaches here only on a 2xx: postJson rejects on
+    // anything else, so a hub error re-sends these prints next poll instead of losing them.
+    // It advances to the highest record we ACTUALLY posted — never to the tip of the log, which
+    // would skip whatever the cap left behind.
+    if (print.jobs.length > 0 && print.maxRecord !== null) {
+        // The pass ENDS here, not in harvestPrintJobs(): this is the only cursor write on the
+        // normal path, and an unchecked failure here is the worst of the three — the harvest keeps
+        // working, the hub keeps deduping, and the same events are re-posted every ~2 min forever
+        // while every surface looks healthy. Clearing the marker is deliberately the LAST thing.
+        if (writePrintCursor(print.maxRecord)) {
+            clearHarvestFailure();
+        } else {
+            reportHarvestFailure('no se pudo escribir el cursor tras subirlo al hub');
+        }
     }
 
     if (typeof response.whitelist_version === 'number' && response.whitelist_version !== body.whitelist_version) {

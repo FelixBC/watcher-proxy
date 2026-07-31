@@ -175,6 +175,18 @@ const PROTECTED_RELATIVE_PATHS = [
     // OTA (incl. a rollback restore) must not touch it: rewriting it would rewrite the "último OK"
     // signal. poll-hub reads its CONTENT (not mtime) as a belt, this is the suspenders.
     'WatcherBrain/guards-ok.txt',
+    // Plan 0013: the print-harvest cursor (last EventRecordID already posted). Runtime state, and
+    // a rollback that REWOUND it would re-send prints the hub already stored — harmless only
+    // because the hub dedups on (machine_id, at, record_id); protect it so we don't rely on that.
+    'WatcherBrain/print-cursor.txt',
+    // The per-machine "we have enabled the print log here at least once" marker. If an OTA
+    // restored/erased it, the machine would forget its own baseline and read the NEXT real
+    // disable as a debut — silently losing the tamper this plan exists to catch.
+    'WatcherBrain/print-log-baselined.flag',
+    // "We already reported the harvest as broken." A rollback restoring a stale one would cost a
+    // missing line or a duplicate — small, but the other two markers are protected for the same
+    // class of reason and an unexplained exception is worse than the line it saves.
+    'WatcherBrain/print-harvest-failed.flag',
     '.git',
 ];
 

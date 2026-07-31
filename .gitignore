@@ -50,3 +50,17 @@ WatcherBrain/guards-ok.txt
 # stray flag would arrive pre-baselined and swallow its FIRST real hibernate revert as
 # housekeeping instead of reporting it as tamper.
 WatcherBrain/hibernate-baselined.flag
+# Plan 0013 — per-machine "this machine has enabled the print log at least once" marker,
+# written by HardenPrinters.ps1. Same reason as the one above: a stray flag in a fresh
+# install would arrive pre-baselined and read its FIRST real revert as housekeeping.
+WatcherBrain/print-log-baselined.flag
+# Plan 0013 — per-machine harvest cursor (last EventRecordID of PrintService/Operational
+# already posted to the hub), owned exclusively by poll-hub.js. Never commit AND never ship:
+# a shipped copy would arrive with the installed files' +h +s attributes, where Node's
+# writeFileSync (CREATE_ALWAYS) throws EPERM — freezing the cursor at the shipped value, so
+# the harvest would die silently and every banca would read "sin impresión" forever.
+WatcherBrain/print-cursor.txt
+# Plan 0013 — "the harvest failure is already reported" marker, so a permanent failure costs one
+# line in the shared events.log instead of 720 a day (that log is capped AND is what diagnostics
+# uploads). Runtime state; must never commit or ship.
+WatcherBrain/print-harvest-failed.flag
