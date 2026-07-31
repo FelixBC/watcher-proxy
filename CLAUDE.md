@@ -36,14 +36,24 @@ contract" at the code sites below — grep that phrase if the shape ever needs r
   its row in the dashboard → 409 → the new install never gets a credential → it's invisible.
 - **Poll** (`WatcherBrain/poll-hub.js`, every ~2 min, SYSTEM task) → `POST /api/agent/poll`.
   Reports internet/proxy/filter state, `whitelist_version`, blocked logs, `recent_visits` (≤25),
-  `first_visit` (con-ruido/sin-ruido), location (~hourly), tamper events, on-request diagnostics.
+  `first_visit` (con-ruido/sin-ruido), location (~hourly), tamper events, on-request diagnostics,
+  and — plan 0013, additive — `print_jobs` (documents printed since the last upload: `at`,
+  `printer`, `bytes`, `job`, `record`; NEVER the document name or the user) plus `print_log`
+  (`enabled`/`tip`/`cursor`, the harvest's health). `print_jobs` is absent from an old agent — and
+  from a new one with nothing to report — so its absence must read as "no proof", never as "it
+  printed". `print_log` is always sent by a new agent, and **`tip: null` means two different
+  things, told apart by `enabled`**: `enabled: null` = the probe itself failed (the machine is
+  print-blind); `enabled` boolean with `tip: null` = the channel is genuinely empty. Reading the
+  second as the first would report healthy quiet bancas as broken.
   Receives back the shared whitelist (only when the version differs — egress optimization), unplug
   state, diag/locate requests, and the latest `agent_version` + download URL + sha256 for OTA.
 - **OTA self-update** (`WatcherBrain/self-update.js`): downloads the release the poll response
   pointed at (Supabase `agent-releases` bucket, published by `watcher-fleet/scripts/publish-agent.mjs`,
   keyed on this repo's `VERSION` file), verifies sha256, backs up, swaps files, restarts, health-checks,
   rolls back on failure. Single-flight lock + 3 retries. Never touches identity/secrets.
-  **There is an active P0 here — see "Active work" below before touching this path.**
+  The OTA loop P0 that used to live here is CLOSED (plan 0006 → v1.0.29, then superseded by 0007's
+  blue-green cutover). `PROTECTED_RELATIVE_PATHS` is the list an update must never overwrite or
+  roll back — per-machine runtime state, cursors and baseline markers all belong in it.
 - **Shared whitelist**: fleet `whitelist_shared` table (versioned), pushed on poll when the version
   differs, additive-only on top of each machine's local `whitelist.txt` (never overwrites it) —
   merge logic in `WatcherBrain/whitelist-merge.js`.
@@ -79,8 +89,8 @@ contract" at the code sites below — grep that phrase if the shape ever needs r
   actually-bound port is persisted via `writeChosenPort`/`readChosenPort` so every checker/setter
   (`CheckPort.*`, the watchdog, `SetProxyByAvailability.ps1`) agrees on it. A sibling already
   listening → `EADDRINUSE` → clean `exit(0)` (intentional — handles the logon-herd case where
-  multiple triggers race to start the proxy). See `docs/plans/0006` for why this same handler is
-  mid-fix.
+  multiple triggers race to start the proxy). See `docs/plans/0006` (CLOSED, shipped in v1.0.29)
+  for why this handler is shaped that way.
 - **Disguise + Hidden+System EPERM:** installed files carry `+h +s`. Node's `writeFileSync`/
   `copyFileSync` (CREATE_ALWAYS) throw EPERM against them — rewrite in place instead with
   `openSync('r+')` + `ftruncateSync` + `writeSync`.
@@ -97,16 +107,22 @@ contract" at the code sites below — grep that phrase if the shape ever needs r
   `C:\WinConfig` (enforced by the zip's fixed `WinConfig/` top folder). A manual `/descargar`
   install runs **in place**, wherever the zip was extracted (`InstallWatcher.bat` uses `%~dp0`).
 
-## Active work — read before touching self-update/proxy-server/watchdog
+## Active work
 
-`docs/plans/0006-selfupdate-loop-fix.md` — **LOCKED, in build** (2026-07-24). A real OTA loop was
-observed on the test PC: killing the old proxy leaves the port held by the OS for minutes, the new
-proxy's `EADDRINUSE` handler exits instead of retrying, the 15s health check fails, and rollback +
-un-cooled re-poll loops with the filter fail-open (~44 min live) — with two fail-closed edges that
-can also cut internet entirely. Fix touches `proxy-server.js`, `CheckPort.ps1`, `self-update.js`.
-Gate: reviewer-separate + a live repro on the test PC as the E2E gate before re-publishing OTA.
-Ships as v1.0.29, must supersede/retire the v1.0.28 `agent_release` row. Check this plan's status
-before assuming the current `VERSION`/OTA state.
+`docs/plans/0013-senal-de-impresion-real.md` — **APROBADO, en construcción** (2026-07-31). The
+"proven work" signal the hub demands (`qpay.tv`/`opay.tv` traffic) **does not exist** — verified with
+real printed tickets, not suspected — so no banca can ever read as working. The replacement is
+**event 307 of `Microsoft-Windows-PrintService/Operational`**, whose shape is now OBSERVED on the
+test PC (see the plan's "OBSERVADO" section: structured `UserData` fields, `EventRecordID` as cursor,
+and **`Pages printed: 0` on the thermal printer** — the unit is the event, never the page count).
+Enabling + re-asserting that log lands **inside `HardenPrinters.ps1`** (same domain, same elevation,
+same ~55 min poll cadence, same exit-code contract); the hub takes one **additive** poll field.
+Gate: separate reviewer + paper tickets counted by hand against the dashboard.
+
+**Shipped, do not re-open:** `0006` (self-update loop) shipped as **v1.0.29**; its deferred AC4
+(empty whitelist ⇒ last-known-good) was closed by `0008`, and the whole update path was later
+superseded by `0007` (blue-green zero-gap OTA). `VERSION` is the source of truth for the current OTA
+state — it is well past 1.0.29.
 
 ## QA & debugging workflow
 
