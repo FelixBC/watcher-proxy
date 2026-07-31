@@ -1,7 +1,19 @@
 # 0013 — La señal de impresión real (y el detector de reimpresiones)
 
-**Estado: APROBADO (2026-07-31) y en construcción.** La señal quedó **observada** en la PC de
-pruebas antes de escribir código — ver «OBSERVADO» más abajo.
+**Estado: CONSTRUIDO, DESPLEGADO Y MERGEADO (2026-07-31)** — agente v1.0.35 (`watcher-proxy#9`) y
+hub (`watcher-fleet#16`). La señal quedó **observada** en la PC de pruebas ANTES de escribir una
+línea de código: ver «OBSERVADO» más abajo, que es la razón de ser de este plan.
+
+**6 de los 8 criterios verificados en hardware real**: 1 (el log se reactiva en una pasada),
+4 (cursor 15→30, solo tras un 2xx), 5 y 8 (3 tickets de papel = 3 documentos en el panel, mientras
+el chip de auditoría de esa misma ventana cuenta 1), 6 (estreno con 0 tampers, revert posterior
+con 1) y 7. Lo que queda, y por qué NO se puede cerrar en la PC de pruebas, está en «Lo que falta».
+
+**Revisión:** dos rondas de crítico adversarial sobre el diseño y dos de revisor separado sobre el
+código — 18 hallazgos materiales, arreglados. **Sin Codex**: el workspace se quedó sin créditos el
+mismo día y vuelve el 2026-08-05. Todo lo revisado salió de la misma familia de modelos, así que
+**este plan lleva deuda de cross-review**; al volver Codex, `codex review --base main` sobre los
+dos merges.
 
 ## Problema (una frase)
 
@@ -103,6 +115,12 @@ Cada uno comprobable por separado, en la PC de pruebas por SSH salvo donde se di
 3. **Cero impresiones ⇒ cero señal.** Una hora con la plataforma abierta y sin imprimir ⇒ el conteo
    es 0 y el tramo NO se pinta verde. (Este es el criterio que impide «arreglarlo» aflojando la
    regla.)
+   **NO se puede medir en la PC de pruebas, y decirlo importa:** ahí no hay ninguna banca abierta,
+   así que un tramo sin imprimir sale ámbar *porque no hubo plataforma*, no porque la regla
+   funcione — pasaría igual con la señal rota. Este criterio solo prueba algo en una máquina con
+   la plataforma realmente arriba. Y solo vale medido en la **misma sesión** en que el criterio 2
+   salió verde en esa máquina: si no, una cosecha muerta lo satisface exactamente igual de bien
+   que un día tranquilo, que es el fallo que este plan existe para no repetir.
 4. **No se cuenta dos veces ni se pierde nada.** El cursor avanza por evento; dos pasadas seguidas
    sin imprimir no reportan nada; una pasada que falla a mitad no salta eventos en la siguiente.
 5. **Se distingue la impresora.** El hub puede responder «cuántas impresiones fueron a la impresora
@@ -351,6 +369,25 @@ observación del 31/07 — la primera vez que se verá de verdad es en una banca
   banca activa da la vuelta en menos de un día, así que lo que el salto tira lo habría tirado el
   wrap igual, y a cambio el flujo no se muere para siempre. La 7ª invariante es lo que impide que
   ese escenario llegue a una banca.
+
+## Lo que falta (2026-07-31, al cierre)
+
+Nada de esto es trabajo de código: son observaciones que requieren una banca de verdad o los ojos
+de Felix. Se listan para que nadie las dé por hechas leyendo los 6 criterios verdes de arriba.
+
+1. **Criterio 3 — en una banca real, no en la PC de pruebas.** Ver la nota del propio criterio: sin
+   plataforma abierta, el ámbar no prueba nada.
+2. **Criterio 2 — el verde en la barra, sin mirar.** Los datos llegaron (3 filas en `machine_print`,
+   `last_print_at` avanzado, compactación corrida: 69 intervalos) pero **nadie ha mirado la astilla
+   verde de las 6:13 PM**. La página del puesto se rompió justo en ese momento por un fallo
+   distinto —una constante importada de un módulo `"use client"` llegando `undefined` al
+   servidor— y luego se siguió adelante. Es lo único del plan que se dio por bueno sin verlo.
+3. **Deuda de cross-review** hasta el 2026-08-05 (ver la cabecera).
+4. **Rastro de las pruebas, en producción:** la máquina `prueba-01` quedó con una MANIPULADA roja
+   **provocada a propósito** (se apagó el registro para verificar el criterio 6) — hay que marcarla
+   vista, no es real. Y sus 3 tickets de prueba son ahora filas legítimas de `machine_print` con
+   60 días de retención, que suman trabajo probado a ese día. En una máquina dedicada a probar da
+   igual; en una banca de cliente no se hace.
 
 ## Lo que este plan hace posible después (no incluido)
 
