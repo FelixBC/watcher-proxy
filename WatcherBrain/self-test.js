@@ -5,7 +5,7 @@
 // check spawns a REAL second proxy instance, so this suite must NEVER run on a
 // production banca. It runs ONCE per running version (cached in
 // selftest-state.json) and the result travels in the poll body as
-// `selftest: { persistencia|filtro|config|whitelist|cutover|recovery:
+// `selftest: { persistencia|filtro|config|whitelist|cutover|recovery|impresion:
 // "pass"|"fail"|"skip" }`.
 //
 // Design rules (spec forks, LOCKED):
@@ -74,7 +74,7 @@ const CODE_CRYPTO_PATH = path.join(BRAIN_DIR, 'agent-code-crypto.js');
 const STATE_PATH = path.join(BRAIN_DIR, 'selftest-state.json');
 const SUITE_LOCK_PATH = path.join(BRAIN_DIR, 'selftest.lock');
 
-const CHECKS = ['persistencia', 'filtro', 'config', 'whitelist', 'cutover', 'recovery'];
+const CHECKS = ['persistencia', 'filtro', 'config', 'whitelist', 'cutover', 'recovery', 'impresion'];
 
 // A host that can NEVER legitimately be whitelisted (.invalid is RFC-2606
 // reserved). The proxy checks the whitelist BEFORE any DNS/socket work, so the
@@ -248,7 +248,7 @@ function isUnplugged() {
 }
 
 // ---------------------------------------------------------------------------
-// The six checks (spec AC4). Each returns "pass"|"fail"|"skip"; any throw is
+// The seven checks (spec AC4 + plan 0013). Each returns "pass"|"fail"|"skip"; any throw is
 // converted to "fail" by runCheck below.
 // ---------------------------------------------------------------------------
 
@@ -515,6 +515,77 @@ function checkRecovery() {
     return 'pass';
 }
 
+// Plan 0013 — the print-signal harvest template still finds events.
+//
+// This exists because of a failure mode measured on the test PC: an XPath the event log does not
+// understand exits with code 0 and EMPTY output. A broken harvest is therefore indistinguishable
+// from a banca that simply did not sell — the dashboard would read "sin impresión" forever and
+// nobody would know. And it is a VERSION failure, not a machine one: the query template is a
+// constant, so if it breaks it breaks identically on all 300 bancas.
+//
+// That is exactly what this gate is for. A `fail` here halts the rollout at the staging ring
+// instead of shipping a silently-blind fleet, and it fails LOUDLY where the health field on the
+// poll could only fail in a whisper.
+//
+// The assertion is deliberately narrow: given a channel that HOLDS at least one 307, the template
+// must return at least one. It never asserts that this machine printed — that would make the
+// check fail on a quiet day, which is a different thing entirely.
+function checkImpresion() {
+    const { spawnSync } = require('child_process');
+    const run = (args) => {
+        // 3s: the measured read is 10-30 ms, and this suite already carries the cutover cycle
+        // inside the task's 5-minute ExecutionTimeLimit — five 10s ceilings here were quietly
+        // eating that budget for nothing.
+        const r = spawnSync('wevtutil.exe', args, { encoding: 'utf-8', windowsHide: true, timeout: 3000 });
+        return (!r || r.status !== 0) ? null : (r.stdout || '');
+    };
+
+    const CH = 'Microsoft-Windows-PrintService/Operational';
+    const RECORD_RE = /<EventRecordID>\d+<\/EventRecordID>/;
+
+    // TWO verdicts, and conflating them is the trap. `run()` returns null when wevtutil did not
+    // ANSWER (missing channel, denied, 10s timeout under EventLog load) — that is an ENVIRONMENT
+    // verdict and must be "skip", which the hub retries. It returns '' when wevtutil answered and
+    // matched nothing — and on a channel we just measured as non-empty, THAT is the broken
+    // template this check exists to catch, so it is "fail".
+    // The asymmetry matters because the two are not equally expensive: rollout/route.ts HALTS the
+    // whole rollout on any `fail` and self-test.js caches a fail for the entire version, so a
+    // 10-second hiccup would stop the fleet and never retry itself. A `skip` only HOLDs.
+    const gl = run(['gl', CH]);
+    if (gl === null) return 'skip';                             // no such channel on this image
+    if (!/^\s*enabled:\s*true\s*$/m.test(gl)) return 'skip';    // guard hasn't reached it yet (≤55 min)
+
+    const gli = run(['gli', CH]);
+    if (gli === null) return 'skip';
+    const records = /^\s*numberOfLogRecords:\s*(\d+)\s*$/m.exec(gli);
+    if (!records) return 'skip';
+
+    // The novel, breakable part of the harvest query is the EventRecordID comparison (the cursor).
+    // Exercise it against a channel that HAS records — this one when it has any, otherwise System,
+    // which always does. An empty print log is a quiet machine, never a broken build.
+    const controlChannel = Number(records[1]) > 0 ? CH : 'System';
+    const control = run(['qe', controlChannel, '/q:*[System[(EventRecordID>0)]]', '/f:xml', '/c:1', '/rd:false']);
+    if (control === null) return 'skip';
+    if (!RECORD_RE.test(control)) return 'fail';   // answered, and empty — the malformed-XPath signature
+
+    // If this box has actually printed, assert the FULL path end to end.
+    const printed = run(['qe', CH, '/q:*[System[(EventID=307)]]', '/f:xml', '/c:1', '/rd:true']);
+    if (printed === null) return 'skip';
+    if (!RECORD_RE.test(printed)) return 'pass';   // nothing printed here — template proven by the control
+
+    const full = run(['qe', CH, '/q:*[System[(EventID=307) and (EventRecordID>0)]]', '/f:xml', '/c:1', '/rd:false']);
+    if (full === null) return 'skip';
+    if (!RECORD_RE.test(full)) return 'fail';
+    // Assert the SHAPES poll-hub.js's parser actually requires, not merely the ones the query
+    // returns. Those three regexes are as global-per-version as the XPath: a Windows build that
+    // emitted double quotes on SystemTime, or renamed the UserData wrapper, would make the
+    // harvester drop EVERY event in silence while this invariant still reported pass — the same
+    // blind spot, just moved from the query to the parser.
+    if (!/<DocumentPrinted/.test(full)) return 'fail';
+    if (!/<TimeCreated\s+SystemTime='/.test(full)) return 'fail';
+    return /<Param5>[\s\S]*?<\/Param5>/.test(full) ? 'pass' : 'fail';
+}
+
 // ---------------------------------------------------------------------------
 // Suite driver
 // ---------------------------------------------------------------------------
@@ -528,7 +599,7 @@ async function runCheck(fn) {
     }
 }
 
-// The suite. NEVER throws; always returns all six keys, each "pass"|"fail"|"skip".
+// The suite. NEVER throws; always returns all seven keys, each "pass"|"fail"|"skip".
 // Checks run sequentially (cheapest first, the scratch-proxy cycle second to
 // last) so an early hard failure still leaves a fully-populated report.
 async function runSelfTest() {
@@ -539,6 +610,7 @@ async function runSelfTest() {
         whitelist: await runCheck(checkWhitelistMerge),
         cutover: await runCheck(checkCutover),
         recovery: await runCheck(checkRecovery),
+        impresion: await runCheck(checkImpresion),
     };
 }
 
@@ -639,7 +711,7 @@ async function maybeRunSelfTest(runningVersion) {
 }
 
 // Manual QA entry point (staging HW verification): `node self-test.js` prints
-// the six results as JSON. NOTE: this runs the REAL suite, including the
+// the seven results as JSON. NOTE: this runs the REAL suite, including the
 // scratch-proxy cutover cycle — intended for the staging PC, never a banca.
 if (require.main === module) {
     runSelfTest().then((results) => {
