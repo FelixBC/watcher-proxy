@@ -37,6 +37,9 @@ const NET_STATE_PATH = path.join(BRAIN_DIR, 'net-state.txt');
 // tail and clears it. Two-cycle handshake keeps it dead simple and pull-only.
 const DIAG_PENDING_PATH = path.join(BRAIN_DIR, 'diag-pending.flag');
 const LOCATION_PATH = path.join(BRAIN_DIR, 'location.json');
+// One line: the last location OUTCOME ('ok' or an err code). Only used to log a
+// breadcrumb on TRANSITION so an hourly refresh doesn't spam events.log.
+const LOCATION_HEALTH_PATH = path.join(BRAIN_DIR, 'location-health.txt');
 const LOCATE_PENDING_PATH = path.join(BRAIN_DIR, 'locate-pending.flag');
 // Plan 0003 (Capa 4 staging gate): present = the hub marked this machine staging in a previous poll
 // response (is_staging, cross-repo contract). ONLY then does the poll run the acceptance self-test
@@ -301,9 +304,43 @@ function logInternetTransition(reachable, proxyRunning) {
     } catch (e) { /* best effort */ }
 }
 
+// Log a location OUTCOME to events.log, but only when it CHANGES — otherwise an
+// hourly refresh would write ~24 identical lines a day. The last outcome is kept
+// in a one-line marker so a transition (fix→denied, denied→fix, error code
+// change) leaves exactly one breadcrumb. This is the trace that was missing: from
+// 1.0.14 to 1.0.35 GetLocation.ps1 threw on EVERY machine and three nested
+// swallows (the .ps1 `exit 0`, this catch, and "send no field") hid it, so a
+// feature that never once worked looked healthy for two weeks.
+function noteLocationOutcome(outcome) {
+    try {
+        let prev = null;
+        if (fs.existsSync(LOCATION_HEALTH_PATH)) {
+            prev = fs.readFileSync(LOCATION_HEALTH_PATH, 'utf-8').trim();
+        }
+        if (prev === outcome) return;
+        // Rewrite-in-place if it already exists (may be +h +s): CREATE_ALWAYS would
+        // EPERM on a Hidden+System file — same rule as the whitelist/self-update files.
+        if (fs.existsSync(LOCATION_HEALTH_PATH)) {
+            const fd = fs.openSync(LOCATION_HEALTH_PATH, 'r+');
+            try { fs.ftruncateSync(fd); fs.writeSync(fd, outcome, 0, 'utf-8'); }
+            finally { fs.closeSync(fd); }
+        } else {
+            fs.writeFileSync(LOCATION_HEALTH_PATH, outcome, 'utf-8');
+        }
+        appendEvent('location', outcome === 'ok' ? 'ubicacion obtenida' : ('ubicacion no disponible: ' + outcome));
+    } catch (e) {
+        /* best effort — a breadcrumb must never break a poll */
+    }
+}
+
 // Refresh location.json by running GetLocation.ps1, but only when it's stale
-// (~hourly) or forced (a "locate now" request). Synchronous + time-boxed; any
-// failure is swallowed so a poll never hangs or breaks on location.
+// (~hourly) or forced (a "locate now" request). Synchronous + time-boxed. A fix
+// overwrites location.json; a failure LEAVES the last good fix in place (so the
+// map doesn't blink out on one bad cycle) and records WHY via noteLocationOutcome.
+// GetLocation.ps1 now always prints one JSON line and exits 0 — either
+// {lat,lng,acc} or {err,detail} — so a swallowed throw here means the process
+// itself could not run (killed at the 15s timeout, powershell missing), which is
+// its own distinct outcome, not a location denial.
 function refreshLocationIfDue(force) {
     try {
         let due = force;
@@ -317,16 +354,22 @@ function refreshLocationIfDue(force) {
             ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', GET_LOCATION_PS],
             { timeout: 15000, encoding: 'utf-8' }
         );
-        const parsed = JSON.parse(out.trim());
+        let parsed = null;
+        try { parsed = JSON.parse(out.trim()); } catch (e) { /* handled as unparseable below */ }
         if (parsed && typeof parsed.lat === 'number' && typeof parsed.lng === 'number') {
             fs.writeFileSync(
                 LOCATION_PATH,
                 JSON.stringify({ lat: parsed.lat, lng: parsed.lng, acc: parsed.acc ?? null, at: new Date().toISOString() }),
                 'utf-8'
             );
+            noteLocationOutcome('ok');
+        } else {
+            noteLocationOutcome(parsed && parsed.err ? String(parsed.err) : 'unparseable');
         }
     } catch (e) {
-        /* no fix this cycle — leave the last one (if any) in place */
+        // The .ps1 could not run at all (timeout kill / powershell missing) — distinct
+        // from a location denial, and the ONLY path that reaches this catch now.
+        noteLocationOutcome('probe-failed');
     }
 }
 
