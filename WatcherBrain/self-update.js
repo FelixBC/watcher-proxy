@@ -169,6 +169,10 @@ const PROTECTED_RELATIVE_PATHS = [
     'WatcherBrain/machine-zone.txt',
     'WatcherBrain/machine-code.txt',
     'WatcherBrain/location.json',
+    // The last location OUTCOME ('ok'/err code). Runtime state used only to log a
+    // breadcrumb on transition — an OTA restoring a stale value would fire a spurious
+    // "location changed" line, so keep it out of the swap.
+    'WatcherBrain/location-health.txt',
     'WatcherBrain/locate-pending.flag',
     'WatcherBrain/tamper-cursor.txt',
     // Plan 0011: per-machine "guards last confirmed clean" marker. Runtime state, never code — an
