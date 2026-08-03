@@ -866,6 +866,19 @@ function triggerSelfUpdate(version, url, sha256) {
 // machine that failed to enroll still polls and still needs its launchers reconciled.
 // Fully wrapped so launcher cleanup can never break a poll. NOT a golden-rule concern:
 // it touches no proxy process, registry, or internet setting.
+//
+// KNOWN LIMIT (accepted, self-healing — deferred fix, see docs/plans/0005): if the 1.0.38 OTA
+// copies the new exes and then FAILS validation, self-update's rollback (restoreBackup) is an
+// additive overlay — it restores the old Instalar.exe but does NOT remove the just-added
+// Install.exe/Uninstall.exe, which self-update created WITHOUT +h +s. The rolled-back machine
+// then runs the OLD poll-hub (no reconcile), so the new exes sit VISIBLE until 1.0.38 (or a later
+// version carrying this code) SUCCESSFULLY lands — at which point the first post-commit poll runs
+// reconcile and converges (deletes Instalar.exe, hides both). So the leak is bounded to a
+// rolled-back-and-not-yet-resucceeded machine and heals itself on the next successful update; a
+// launcher-rename release doesn't touch the proxy, so a rollback is unlikely to begin with. The
+// COMPLETE fix (rollback removes root *.exe absent from the backup) lives in self-update.js's
+// golden-rule-critical rollback path and is filed as its own change — deliberately NOT folded in
+// here to keep this migration out of the OTA rollback engine.
 const LAUNCHER_MIGRATION_MARKER = path.join(BRAIN_DIR, 'launchers-1.0.38.done');
 const UPDATING_FLAG_PATH = path.join(BRAIN_DIR, 'updating.flag');
 // Coupled to the .ps1 watchdog layers' STALE_FLAG_MINUTES (CheckAndStartProxy.ps1 /
