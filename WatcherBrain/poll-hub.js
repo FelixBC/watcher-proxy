@@ -882,21 +882,26 @@ function reconcileLaunchers() {
         // Full path to attrib.exe — a bare 'attrib' can fail to resolve under SYSTEM's
         // PATH; System32 is always present.
         const attribExe = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'attrib.exe');
-        let anyPresent = false;
+        let bothPresent = true;
         let hideFailed = false;
         for (const name of ['Install.exe', 'Uninstall.exe']) {
             const p = path.join(rootDir, name);
             if (fs.existsSync(p)) {
-                anyPresent = true;
                 try { execFileSync(attribExe, ['+h', '+s', p], { windowsHide: true, timeout: 8000 }); }
                 catch (e) { hideFailed = true; }
+            } else {
+                bothPresent = false; // one launcher not copied yet — don't latch on a partial swap
             }
         }
 
-        // Latch ONLY once the new launchers are present AND hidden cleanly, so a machine
-        // that polled before the swap (new names absent) or hit a transient attrib failure
-        // re-checks next poll instead of latching a half-done state.
-        if (anyPresent && !hideFailed) {
+        // Latch ONLY once BOTH new launchers are present AND hidden cleanly. copyTree is an
+        // additive, non-atomic overlay: an interrupted OTA can land ONE launcher before a poll
+        // fires. Latching on "any present" would hide that one, mark done, and then never
+        // re-hide the second launcher a later retry adds — leaving it VISIBLE forever. Requiring
+        // both (fail-closed: whole set or nothing) makes such a machine re-check next poll, so
+        // it converges only when the swap is actually complete. A machine that polled before the
+        // swap (both names absent) or hit a transient attrib failure re-checks the same way.
+        if (bothPresent && !hideFailed) {
             try { fs.writeFileSync(LAUNCHER_MIGRATION_MARKER, new Date().toISOString(), 'utf-8'); } catch (e) {}
         }
     } catch (e) { /* never let launcher cleanup break the poll */ }
