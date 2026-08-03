@@ -103,27 +103,41 @@ jobs:
           path: scripts/installer/Instalar.exe
           if-no-files-found: error
 
+  build-bundle:
+    # Build the SHIPPED zip with the real build script. On Linux because the
+    # script needs `zip` (absent from the windows-latest git-bash).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the WinConfig bundle
+        run: bash scripts/build-winconfig-bundle.sh
+      - name: Upload bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: winconfig-bundle
+          path: dist/winconfig-install.zip
+          if-no-files-found: error
+
   install-from-bundle:
-    # Gold-standard: build the SHIPPED zip, extract it exactly like install.ps1
-    # does (top folder "WinConfig" -> C:\WinConfig), then install headless from
-    # there. Proves the actual downloadable artifact installs - not just a checkout.
+    # Gold-standard: extract the SHIPPED zip exactly like install.ps1 does (top
+    # folder "WinConfig" -> C:\WinConfig) and install headless from there. Proves
+    # the actual downloadable artifact installs - not just a raw checkout.
+    needs: build-bundle
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Build the WinConfig bundle
-        shell: bash
-        run: |
-          command -v zip unzip shasum || { echo "missing zip/unzip/shasum"; exit 1; }
-          bash scripts/build-winconfig-bundle.sh
+      - name: Download the built bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: winconfig-bundle
+          path: bundle
 
       - name: Extract to C:\WinConfig (as install.ps1 does)
         shell: powershell
         run: |
-          Expand-Archive -Path dist\winconfig-install.zip -DestinationPath C:\ -Force
+          Expand-Archive -Path bundle\winconfig-install.zip -DestinationPath C:\ -Force
           if (-not (Test-Path 'C:\WinConfig\InstallWatcher.bat')) { throw "bundle did not extract to C:\WinConfig" }
-          Write-Host "Extracted. The bundle does NOT ship scripts/ci (by design):"
-          Write-Host ("  scripts/ci present in bundle: {0}" -f (Test-Path 'C:\WinConfig\scripts\ci'))
+          Write-Host ("scripts/ci present in bundle (should be False): {0}" -f (Test-Path 'C:\WinConfig\scripts\ci'))
 
       - name: Install headless from the extracted bundle
         shell: powershell
