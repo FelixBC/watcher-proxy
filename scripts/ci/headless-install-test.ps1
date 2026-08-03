@@ -40,13 +40,44 @@ $BatPath  = Join-Path $InstallRoot 'InstallWatcher.bat'
 $BrainDir = Join-Path $InstallRoot 'WatcherBrain'
 if (-not (Test-Path $BatPath)) { Write-Host "FATAL: $BatPath missing"; exit 1 }
 
-# ---- Replicate WinConfigWizard.ps1 Start-Action --------------------------------
+# ---- Diagnostic: prove the cmd quote-stripping root cause -----------------------
+# The wizard builds `cmd /c "bat" > "log" 2>&1`. With 4 quotes + special chars, cmd's
+# quote rule strips the leading + last quote and mangles the command. The fix is an
+# OUTER pair of quotes around the whole thing. Prove both here before trusting either.
+Section "Diagnostic: broken vs fixed cmd quoting"
+$diagLogBroken = Join-Path $env:TEMP ('diag-broken-{0}.log' -f ([guid]::NewGuid().ToString('N')))
+$diagLogFixed  = Join-Path $env:TEMP ('diag-fixed-{0}.log'  -f ([guid]::NewGuid().ToString('N')))
+$echoBat = Join-Path $env:TEMP ('diag-echo-{0}.bat' -f ([guid]::NewGuid().ToString('N')))
+Set-Content -Path $echoBat -Value "@echo off`r`necho DIAG_RAN_OK" -Encoding ASCII
+function Invoke-CmdForm([string]$args, [string]$log) {
+    $p = New-Object System.Diagnostics.ProcessStartInfo
+    $p.FileName = 'cmd.exe'; $p.Arguments = $args
+    $p.UseShellExecute = $false; $p.CreateNoWindow = $true
+    $p.RedirectStandardOutput = $true; $p.RedirectStandardError = $true
+    $pr = [System.Diagnostics.Process]::Start($p)
+    $so = $pr.StandardOutput.ReadToEnd(); $se = $pr.StandardError.ReadToEnd(); $pr.WaitForExit()
+    $content = ''
+    if (Test-Path $log) { $content = (Get-Content $log -Raw) }
+    Write-Host ("  cmd stderr: {0}" -f ($se.Trim()))
+    Write-Host ("  log captured DIAG_RAN_OK: {0}" -f ($content -match 'DIAG_RAN_OK'))
+    return ($content -match 'DIAG_RAN_OK')
+}
+Write-Host "BROKEN form  ('/c ""bat"" > ""log"" 2>&1'):"
+$brokenWorks = Invoke-CmdForm ('/c "{0}" > "{1}" 2>&1' -f $echoBat, $diagLogBroken) $diagLogBroken
+Write-Host "FIXED form   ('/c """"bat"" > ""log"" 2>&1""'):"
+$fixedWorks = Invoke-CmdForm ('/c ""{0}" > "{1}" 2>&1"' -f $echoBat, $diagLogFixed) $diagLogFixed
+Check "current wizard quoting is BROKEN (expected)" (-not $brokenWorks) "broken captured=$brokenWorks"
+Check "outer-quote FIX works" ($fixedWorks) "fixed captured=$fixedWorks"
+Remove-Item $echoBat, $diagLogBroken, $diagLogFixed -Force -ErrorAction SilentlyContinue
+
+# ---- Replicate WinConfigWizard.ps1 Start-Action (WITH THE FIX APPLIED) ----------
 Section "Running InstallWatcher.bat via the wizard's handoff (hidden, env-var identity)"
 $logPath = Join-Path $env:TEMP ('winconfig-wiz-{0}.log' -f ([guid]::NewGuid().ToString('N')))
 
 $psi = New-Object System.Diagnostics.ProcessStartInfo
 $psi.FileName = 'cmd.exe'
-$psi.Arguments = ('/c "{0}" > "{1}" 2>&1' -f $BatPath, $logPath)
+# Outer pair of quotes wraps the whole redirected command (the fix this run validates).
+$psi.Arguments = ('/c ""{0}" > "{1}" 2>&1"' -f $BatPath, $logPath)
 $psi.WorkingDirectory = $InstallRoot
 $psi.UseShellExecute = $false
 $psi.CreateNoWindow = $true
