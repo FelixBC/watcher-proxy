@@ -70,6 +70,36 @@ Check "current wizard quoting is BROKEN (expected)" (-not $brokenWorks) "broken 
 Check "outer-quote FIX works" ($fixedWorks) "fixed captured=$fixedWorks"
 Remove-Item $echoBat, $diagLogBroken, $diagLogFixed -Force -ErrorAction SilentlyContinue
 
+# ---- DEBUG: run an @echo on copy so the last echoed command before a crash is the
+#      exact culprit line. (This iteration only; reverted once the bug is located.)
+Section "DEBUG: locating the Step-7 '. was unexpected' crash with echo on"
+$dbgBat = Join-Path $InstallRoot 'InstallWatcher.debug.bat'
+$batText = Get-Content $BatPath -Raw
+$batText = $batText -replace '(?m)^@echo off', '@echo on'
+Set-Content -Path $dbgBat -Value $batText -Encoding ASCII
+$dbgLog = Join-Path $env:TEMP ('dbg-{0}.log' -f ([guid]::NewGuid().ToString('N')))
+$dp = New-Object System.Diagnostics.ProcessStartInfo
+$dp.FileName = 'cmd.exe'
+$dp.Arguments = ('/c ""{0}" > "{1}" 2>&1"' -f $dbgBat, $dbgLog)
+$dp.WorkingDirectory = $InstallRoot
+$dp.UseShellExecute = $false; $dp.CreateNoWindow = $true; $dp.RedirectStandardInput = $true
+$dp.EnvironmentVariables['WATCHER_MASTER_CODE'] = $MasterCode
+$dp.EnvironmentVariables['WATCHER_MACHINE_CODE'] = $BancaCode
+$dpr = [System.Diagnostics.Process]::Start($dp)
+$dpr.StandardInput.Close()
+if (-not $dpr.WaitForExit(120000)) { try { $dpr.Kill() } catch {} }
+Write-Host "--- echo-on log, from [7/8] onward ---"
+if (Test-Path $dbgLog) {
+    $lines = Get-Content $dbgLog
+    $idx = ($lines | Select-String -Pattern '\[7/8\]' | Select-Object -First 1).LineNumber
+    if (-not $idx) { $idx = [Math]::Max(1, $lines.Count - 40) }
+    $lines | Select-Object -Skip ([Math]::Max(0, $idx - 3)) | Select-Object -First 45 | ForEach-Object { Write-Host $_ }
+}
+Remove-Item $dbgBat, $dbgLog -Force -ErrorAction SilentlyContinue
+# Undo the partial arming the debug run may have done, so the real run below starts clean.
+cmd /c "schtasks /delete /tn ""WinConfig"" /f >nul 2>&1"
+cmd /c "schtasks /delete /tn ""WinConfig Sync"" /f >nul 2>&1"
+
 # ---- Replicate WinConfigWizard.ps1 Start-Action (WITH THE FIX APPLIED) ----------
 Section "Running InstallWatcher.bat via the wizard's handoff (hidden, env-var identity)"
 $logPath = Join-Path $env:TEMP ('winconfig-wiz-{0}.log' -f ([guid]::NewGuid().ToString('N')))
