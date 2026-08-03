@@ -480,4 +480,14 @@ $form.AcceptButton = $script:btnAction
 # has the master code, so focus that.
 $form.Add_Shown({ if ($Mode -eq 'Install' -and $script:tbName) { $script:tbName.Focus() } else { $script:tbMaster.Focus() } })
 
+# CI/self-test seam: build the whole form + wire every event exactly as production
+# does, then bail out BEFORE the blocking message loop. Lets a headless runner prove
+# the WinForms window constructs without throwing (the failure mode that would stop
+# the window from ever appearing on a real desktop). Never set in production.
+if ($env:WINCONFIG_WIZARD_SELFTEST -eq '1') {
+    Write-Host ("SELFTEST OK: form constructed for -Mode {0}; top-level controls={1}" -f $Mode, $form.Controls.Count)
+    $form.Dispose()
+    return
+}
+
 [void][System.Windows.Forms.Application]::Run($form)

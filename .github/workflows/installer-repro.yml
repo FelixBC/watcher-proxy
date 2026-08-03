@@ -41,6 +41,17 @@ jobs:
           if ($errs) { $errs | ForEach-Object { Write-Host $_.Message }; throw "wizard has parse errors" }
           Write-Host "WinConfigWizard.ps1 parses clean."
 
+      - name: Wizard WinForms builds without throwing (both modes)
+        shell: powershell
+        run: |
+          $env:WINCONFIG_WIZARD_SELFTEST = '1'
+          foreach ($mode in @('Install','Uninstall')) {
+            $out = & powershell -NoProfile -ExecutionPolicy Bypass -STA -File 'C:\WinConfig\WatcherBrain\WinConfigWizard.ps1' -Mode $mode 2>&1 | Out-String
+            Write-Host $out.Trim()
+            if ($out -notmatch 'SELFTEST OK') { throw "wizard form did not construct for -Mode $mode" }
+          }
+          Write-Host "Both wizard modes construct their WinForms window without error."
+
       - name: Collect logs on failure
         if: always()
         shell: powershell
