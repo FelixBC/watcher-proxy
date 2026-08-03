@@ -868,18 +868,34 @@ function triggerSelfUpdate(version, url, sha256) {
 // it touches no proxy process, registry, or internet setting.
 const LAUNCHER_MIGRATION_MARKER = path.join(BRAIN_DIR, 'launchers-1.0.38.done');
 const UPDATING_FLAG_PATH = path.join(BRAIN_DIR, 'updating.flag');
+// Coupled to the .ps1 watchdog layers' STALE_FLAG_MINUTES (CheckAndStartProxy.ps1 /
+// SetProxyByAvailability.ps1) and self-update.js's health window — keep the three in step.
+const STALE_UPDATING_FLAG_MS = 15 * 60 * 1000;
+// updating.flag is "active" only while FRESH. self-update writes it (mtime = now) from before it
+// copies the new tree until it commits/rolls-back (cleared in its finally). But if self-update is
+// KILLED or the machine loses power after writing the new VERSION and before that finally runs, the
+// flag is orphaned — and since VERSION already matches, no same-version update ever runs to clear
+// it. An existence-only gate would then skip reconcile FOREVER. So mirror the watchdog: a flag older
+// than STALE_UPDATING_FLAG_MS is treated as ABSENT, letting an orphaned update self-heal on the next
+// poll. mtimeMs and Date.now() are both absolute epoch ms, so the subtraction is timezone-safe.
+function isUpdatingActive() {
+    try {
+        const ageMs = Date.now() - fs.statSync(UPDATING_FLAG_PATH).mtimeMs;
+        return ageMs <= STALE_UPDATING_FLAG_MS;
+    } catch (e) {
+        return false; // absent or unreadable → not updating
+    }
+}
 function reconcileLaunchers() {
     try {
         if (fs.existsSync(LAUNCHER_MIGRATION_MARKER)) return; // already reconciled here
-        // Never reconcile mid-cutover. self-update.js holds updating.flag from before it copies
-        // the new tree until the update COMMITS (or rolls back) — cleared in its finally, so this
-        // gate can never latch permanently. Without it, a poll firing during the ~minutes-long
-        // validation window (polls every ~2 min, self-update can run up to ~5) would load the new
-        // code, see both exes already copied, hide them and write the marker BEFORE cutover. If
-        // validation then failed and rolled back to the old launchers, the marker would survive and
-        // permanently skip the real reconcile after a later successful retry. Skip while updating;
-        // the first poll after a clean commit runs it.
-        if (fs.existsSync(UPDATING_FLAG_PATH)) return;
+        // Never reconcile mid-cutover. A poll firing during self-update's ~minutes-long validation
+        // window (polls every ~2 min, update up to ~5) would load the new code, see both exes
+        // already copied, hide them and write the marker BEFORE cutover; if validation then rolled
+        // back to the old launchers, the marker would survive and permanently skip the real
+        // reconcile after a later retry. Gate on a FRESH updating.flag (stale = crashed update,
+        // treated as absent so it self-heals). Reconcile runs on the first poll after a clean commit.
+        if (isUpdatingActive()) return;
         const rootDir = path.join(BRAIN_DIR, '..');
 
         for (const name of ['Instalar.exe', 'Instalar.bat', 'Restaurar.bat']) {
