@@ -105,6 +105,12 @@ EXCLUDE_PATHS=(
     # install/runtime script - so it must not land in the disguised WinConfig folder.
     "scripts/ci"
     ".github"
+    # Local dev tooling only. `.claude` holds Claude Code's config AND its git
+    # worktrees (.claude/worktrees/<name>) — nested working trees git lists as
+    # untracked entries. Packaging them tries to cp a whole worktree into the
+    # bundle (fatal: "cp: .../installer-visual: No such file or directory") and
+    # would ship the repo twice besides. Never agent payload — exclude the lot.
+    ".claude"
     "README.txt"
     "ARCHITECTURE.md"
     "docs"
