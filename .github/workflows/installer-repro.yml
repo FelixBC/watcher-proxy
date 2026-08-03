@@ -102,3 +102,32 @@ jobs:
           name: Instalar-exe
           path: scripts/installer/Instalar.exe
           if-no-files-found: error
+
+  install-from-bundle:
+    # Gold-standard: build the SHIPPED zip, extract it exactly like install.ps1
+    # does (top folder "WinConfig" -> C:\WinConfig), then install headless from
+    # there. Proves the actual downloadable artifact installs - not just a checkout.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the WinConfig bundle
+        shell: bash
+        run: |
+          command -v zip unzip shasum || { echo "missing zip/unzip/shasum"; exit 1; }
+          bash scripts/build-winconfig-bundle.sh
+
+      - name: Extract to C:\WinConfig (as install.ps1 does)
+        shell: powershell
+        run: |
+          Expand-Archive -Path dist\winconfig-install.zip -DestinationPath C:\ -Force
+          if (-not (Test-Path 'C:\WinConfig\InstallWatcher.bat')) { throw "bundle did not extract to C:\WinConfig" }
+          Write-Host "Extracted. The bundle does NOT ship scripts/ci (by design):"
+          Write-Host ("  scripts/ci present in bundle: {0}" -f (Test-Path 'C:\WinConfig\scripts\ci'))
+
+      - name: Install headless from the extracted bundle
+        shell: powershell
+        run: |
+          # The harness is intentionally excluded from the bundle, so run the
+          # workspace copy against the real extracted install root.
+          powershell -NoProfile -ExecutionPolicy Bypass -File "$env:GITHUB_WORKSPACE\scripts\ci\headless-install-test.ps1" -InstallRoot 'C:\WinConfig'
