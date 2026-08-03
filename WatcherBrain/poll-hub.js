@@ -867,9 +867,19 @@ function triggerSelfUpdate(version, url, sha256) {
 // Fully wrapped so launcher cleanup can never break a poll. NOT a golden-rule concern:
 // it touches no proxy process, registry, or internet setting.
 const LAUNCHER_MIGRATION_MARKER = path.join(BRAIN_DIR, 'launchers-1.0.38.done');
+const UPDATING_FLAG_PATH = path.join(BRAIN_DIR, 'updating.flag');
 function reconcileLaunchers() {
     try {
         if (fs.existsSync(LAUNCHER_MIGRATION_MARKER)) return; // already reconciled here
+        // Never reconcile mid-cutover. self-update.js holds updating.flag from before it copies
+        // the new tree until the update COMMITS (or rolls back) — cleared in its finally, so this
+        // gate can never latch permanently. Without it, a poll firing during the ~minutes-long
+        // validation window (polls every ~2 min, self-update can run up to ~5) would load the new
+        // code, see both exes already copied, hide them and write the marker BEFORE cutover. If
+        // validation then failed and rolled back to the old launchers, the marker would survive and
+        // permanently skip the real reconcile after a later successful retry. Skip while updating;
+        // the first poll after a clean commit runs it.
+        if (fs.existsSync(UPDATING_FLAG_PATH)) return;
         const rootDir = path.join(BRAIN_DIR, '..');
 
         for (const name of ['Instalar.exe', 'Instalar.bat', 'Restaurar.bat']) {
