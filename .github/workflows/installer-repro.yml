@@ -9,6 +9,14 @@ on:
   workflow_dispatch:
   push:
     branches: [fix/installer-visual]
+  pull_request:
+    paths:
+      - 'InstallWatcher.bat'
+      - 'WatcherBrain/WinConfigWizard.ps1'
+      - 'WatcherBrain/AskIdentity.ps1'
+      - 'scripts/installer/**'
+      - 'scripts/ci/**'
+      - '.github/workflows/installer-repro.yml'
 
 jobs:
   headless-install:
