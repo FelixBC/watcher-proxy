@@ -72,8 +72,10 @@ PACKAGE STRUCTURE (VISUAL)
   ├─ abracadabra.bat        (hide the Watcher folder)
   ├─ cadabra.bat            (unhide the Watcher folder)
   └─ Watcher\
-     ├─ InstallWatcher.bat  (install / enable)
-     ├─ BackToNormal.bat    (remove / disable)
+     ├─ Install.exe         (install — double-click, opens the wizard)
+     ├─ Uninstall.exe       (remove — double-click, asks for the code)
+     ├─ InstallWatcher.bat  (install engine — run by Install.exe / manual fallback)
+     ├─ BackToNormal.bat    (remove engine — run by Uninstall.exe / manual fallback)
      ├─ whitelist.txt       (allowed websites — per-machine, edit freely)
      ├─ README.txt          (this file)
      └─ WatcherBrain\       (internal engine: proxy + scripts + node.exe)
@@ -220,9 +222,9 @@ IF SOMETHING GOES WRONG
 SUMMARY
 ═══════════════════════════════════════════════════════════════
 
-Install on a PC     → Watcher\InstallWatcher.bat (admin recommended)
+Install on a PC     → Watcher\Install.exe (double-click; InstallWatcher.bat = fallback)
 Allow a website      → Edit Watcher\whitelist.txt and save
-Remove Watcher       → Watcher\BackToNormal.bat (accept the admin prompt window)
+Remove Watcher       → Watcher\Uninstall.exe (double-click; BackToNormal.bat = fallback)
 Restore internet now → WatcherBrain\RestoreInternetNow.bat
 Hide the folder       → abracadabra.bat
 Show the folder       → cadabra.bat
@@ -307,8 +309,10 @@ ESTRUCTURA DEL PAQUETE (VISUAL)
   ├─ abracadabra.bat        (oculta la carpeta Watcher)
   ├─ cadabra.bat            (muestra la carpeta Watcher)
   └─ Watcher\
-     ├─ InstallWatcher.bat  (instalar / activar)
-     ├─ BackToNormal.bat    (quitar / desactivar)
+     ├─ Install.exe         (instalar — doble clic, abre el asistente)
+     ├─ Uninstall.exe       (quitar — doble clic, pide el codigo)
+     ├─ InstallWatcher.bat  (motor de instalación — lo corre Install.exe / fallback manual)
+     ├─ BackToNormal.bat    (motor de quitar — lo corre Uninstall.exe / fallback manual)
      ├─ whitelist.txt       (páginas permitidas — por máquina, editable)
      ├─ README.txt          (este archivo)
      └─ WatcherBrain\       (motor interno: proxy + scripts + node.exe)
@@ -453,9 +457,9 @@ SI ALGO SALE MAL
 RESUMEN
 ═══════════════════════════════════════════════════════════════
 
-Instalar en una PC       → Watcher\InstallWatcher.bat (admin recomendado)
+Instalar en una PC       → Watcher\Install.exe (doble clic; InstallWatcher.bat = fallback)
 Permitir una página      → Editar Watcher\whitelist.txt y guardar
-Quitar Watcher           → Watcher\BackToNormal.bat (aceptar la ventana de permisos)
+Quitar Watcher           → Watcher\Uninstall.exe (doble clic; BackToNormal.bat = fallback)
 Restaurar internet ya    → WatcherBrain\RestoreInternetNow.bat
 Ocultar la carpeta       → abracadabra.bat
 Mostrar la carpeta       → cadabra.bat

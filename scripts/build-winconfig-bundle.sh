@@ -121,12 +121,11 @@ EXCLUDE_PATHS=(
     # script. (AGENTS.md doesn't exist in this repo today; excluded defensively.)
     "CLAUDE.md"
     "AGENTS.md"
-    # Instalar.bat predates Instalar.exe (v1.0.19, same behaviour, carries the gear
-    # icon in Explorer). Both were shipping side by side with nothing telling a
-    # banca worker which to use - confirmed source of "2 instalar, no se cual usar"
-    # confusion. Instalar.exe is now the ONE launcher on the machine; Instalar.bat
-    # stays in the repo (git-tracked) as a manual dev fallback only, not packaged.
-    "Instalar.bat"
+    # The two double-click launchers that DO ship are Install.exe and Uninstall.exe
+    # (both built from scripts/installer/Launcher.cs — see that folder's README). They
+    # are git-tracked at the repo root and NOT excluded here, so they land in the
+    # bundle. The old Spanish .bat launchers (Instalar.bat / Restaurar.bat) were
+    # removed in the Install/Uninstall rename; nothing to exclude for them anymore.
 )
 
 is_excluded() {

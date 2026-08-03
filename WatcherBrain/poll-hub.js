@@ -16,7 +16,7 @@
 const fs = require('fs');
 const path = require('path');
 const net = require('net');
-const { execSync } = require('child_process');
+const { execSync, execFileSync } = require('child_process');
 
 const { BRAIN_DIR, readHubConfig, readCredential, postJson, getText } = require('./hub-client');
 const { applyPushedWhitelist, getReportableExtras } = require('./whitelist-merge');
@@ -846,6 +846,62 @@ function triggerSelfUpdate(version, url, sha256) {
     child.unref();
 }
 
+// --- Launcher reconciliation (Install/Uninstall rename, v1.0.38) ---------------
+// The double-click launchers were renamed to Install.exe / Uninstall.exe (from the
+// old Instalar.exe / Restaurar.bat). This migration CANNOT live in self-update.js:
+// during the OTA that ships 1.0.38 the running process is still the OLD self-update.js
+// (Node loaded it at startup), and afterwards VERSION already equals the new version
+// so self-update returns early and never runs again. The poll task, by contrast, is a
+// FRESH SYSTEM process every ~2 min, so the first poll AFTER the update runs THIS (new)
+// code — the only reliable place for a post-update file migration.
+//   1. Delete the obsolete launchers OTA leaves behind — copyTree only adds/overwrites,
+//      it never removes a file absent from the new bundle, so the old names would linger
+//      next to the new ones ("two files, which do I use?").
+//   2. Re-hide the current launchers with +h +s — OTA's copyFileSync CREATES the new
+//      Install.exe/Uninstall.exe WITHOUT the disguise attributes a fresh install applies
+//      (InstallWatcher.bat hides every file but abracadabra.bat), so an OTA-added launcher
+//      would otherwise sit VISIBLE at the install root.
+// Idempotent + marker-gated (one-time cost). SYSTEM-only, no credential, no network —
+// exactly like reassertHardeningIfDue — so it runs ABOVE the not-enrolled guard: a
+// machine that failed to enroll still polls and still needs its launchers reconciled.
+// Fully wrapped so launcher cleanup can never break a poll. NOT a golden-rule concern:
+// it touches no proxy process, registry, or internet setting.
+const LAUNCHER_MIGRATION_MARKER = path.join(BRAIN_DIR, 'launchers-1.0.38.done');
+function reconcileLaunchers() {
+    try {
+        if (fs.existsSync(LAUNCHER_MIGRATION_MARKER)) return; // already reconciled here
+        const rootDir = path.join(BRAIN_DIR, '..');
+
+        for (const name of ['Instalar.exe', 'Instalar.bat', 'Restaurar.bat']) {
+            try {
+                const p = path.join(rootDir, name);
+                if (fs.existsSync(p)) fs.unlinkSync(p); // +h+s never blocks unlink
+            } catch (e) { /* best-effort; a stale shim is harmless */ }
+        }
+
+        // Full path to attrib.exe — a bare 'attrib' can fail to resolve under SYSTEM's
+        // PATH; System32 is always present.
+        const attribExe = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'attrib.exe');
+        let anyPresent = false;
+        let hideFailed = false;
+        for (const name of ['Install.exe', 'Uninstall.exe']) {
+            const p = path.join(rootDir, name);
+            if (fs.existsSync(p)) {
+                anyPresent = true;
+                try { execFileSync(attribExe, ['+h', '+s', p], { windowsHide: true, timeout: 8000 }); }
+                catch (e) { hideFailed = true; }
+            }
+        }
+
+        // Latch ONLY once the new launchers are present AND hidden cleanly, so a machine
+        // that polled before the swap (new names absent) or hit a transient attrib failure
+        // re-checks next poll instead of latching a half-done state.
+        if (anyPresent && !hideFailed) {
+            try { fs.writeFileSync(LAUNCHER_MIGRATION_MARKER, new Date().toISOString(), 'utf-8'); } catch (e) {}
+        }
+    } catch (e) { /* never let launcher cleanup break the poll */ }
+}
+
 async function main() {
     const cred = readCredential();
 
@@ -862,6 +918,12 @@ async function main() {
     // so it has no periodic trigger here at all — plan 0010 §Límites (the shipped bundle
     // always includes HubConfig.json, so this is an edge/manual config, not a real banca).
     reassertHardeningIfDue();
+
+    // One-time launcher rename cleanup (Install/Uninstall, v1.0.38). Same rationale as
+    // the hardening re-assert above: a purely LOCAL, SYSTEM-only, no-credential/no-network
+    // property, so it must run ABOVE the not-enrolled guard — a machine that failed to
+    // enroll still polls and still needs its old launchers removed + new ones hidden.
+    reconcileLaunchers();
 
     // Not enrolled (no credential on disk). We deliberately do NOT try to
     // re-register here: enrollment needs the plaintext master code, which is
