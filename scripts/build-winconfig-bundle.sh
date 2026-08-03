@@ -100,6 +100,11 @@ EXCLUDE_PATHS=(
     "install.ps1"
     "scripts/build-winconfig-bundle.sh"
     "scripts/installer"
+    # CI-only: the headless install reproduction + its GitHub Actions workflow. Pure
+    # dev tooling (drives InstallWatcher.bat on a Windows runner), never read by any
+    # install/runtime script - so it must not land in the disguised WinConfig folder.
+    "scripts/ci"
+    ".github"
     "README.txt"
     "ARCHITECTURE.md"
     "docs"

@@ -112,3 +112,36 @@ archivos nuevos (sha `0caa5c71…`).
   Listo; máquina sana (1 node, filtrando, hash presente). Inyectar un fallo → «No se completó»
   + máquina desarmada (internet normal). Fallback consola si se fuerza WinForms a fallar.
 - Ojo físico: la ventana se ve en el logon interactivo (por SSH no hay desktop).
+
+## RESUELTO — 2026-08-03 (dos bugs mortales encontrados en Windows REAL, arreglados y probados)
+El wizard mostraba la ventana pero **nunca instalaba** ("siempre al final"). La causa nunca
+se vio porque la verificación de HW (TEST 01, plan 0003) corrió `InstallWatcher.bat` **directo
+por SSH ya elevado** — jamás por el envoltorio `cmd /c "bat" > log 2>&1` del wizard. Ese delta
+nunca se había ejecutado. Reproducido headless en un runner **windows-latest**
+(`.github/workflows/installer-repro.yml` + `scripts/ci/headless-install-test.ps1`), que corre el
+handoff EXACTO del wizard y afirma el estado armado.
+
+**Bug 1 (el camino visual entero estaba muerto):** `WinConfigWizard.ps1` armaba
+`cmd /c "bat" > "log" 2>&1`. Con 4 comillas + `>`/`&`, cmd aplica su regla de "quita la 1ª y la
+última comilla" → comando destrozado → *"The filename, directory name, or volume label syntax is
+incorrect."* → el .bat NO corre → el panel caía directo a "No se pudo completar". **Fix:** envolver
+todo en un par de comillas externas: `('/c ""{0}" > "{1}" 2>&1"' -f $BatPath, $logPath)`.
+
+**Bug 2 (crash "al final", paso [7/8]):** `InstallWatcher.bat`, en el `else` del chequeo de
+`HubConfig.json`, tenía paréntesis SIN escapar en un echo (`...remote update). Proxy...`). Dentro de
+un bloque `( )`, ese `)` cierra el bloque antes de tiempo → `. Proxy...` suelto → *". was unexpected
+at this time."* → exit 255, sin hash de desinstalación ni enroll. cmd parsea todo el `if()else()`
+antes de ejecutar, por eso caía aunque HubConfig sí exista. **Fix:** escapar (`^(` / `^)`). Este
+también rompía el **fallback de consola**.
+
+**Endurecimiento del launcher (propose-only):** `Instalar.exe` ahora es elevado por manifiesto
+(`scripts/installer/Instalar.manifest`, requireAdministrator) → UAC sobre "Instalar" (icono
+WinConfig), no sobre "Windows PowerShell"; y `Instalar.cs` lanza el wizard por powershell directo
+(sin ventana, sin depender de WSH) con wscript y consola como fallbacks. El exe se compila y verifica
+en CI (job `build-exe`). VERSION → 1.0.37; bundle reconstruido (`dist/winconfig-install.zip`,
+sha256 d3d4a623…). El bundle excluye `.github/` y `scripts/ci/`.
+
+**Verificado headless (windows-latest):** `[1/8]→[8/8]`, exit 0, hash de desinstalación escrito
+(anti-brick), tareas WinConfig/WinConfig Sync creadas, sin residuo de texto plano; el WinForms
+CONSTRUYE sin excepción en Install y Uninstall. **NO verificado (sin escritorio):** el render exacto
+en píxeles — confirmar de ojo en el logon físico. **PR #11.** propose-only: Felix mergea + despliega.
