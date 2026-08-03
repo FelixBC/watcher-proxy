@@ -114,6 +114,13 @@ EXCLUDE_PATHS=(
     "README.txt"
     "ARCHITECTURE.md"
     "docs"
+    # Same reason as README.txt/docs: these are the dev-facing map of the whole
+    # system (cross-repo contract, master code, the disguise itself). Shipping
+    # them at the top of the "WinConfig" folder hands a curious banca worker the
+    # exact explanation the disguise exists to withhold. Not read by any runtime
+    # script. (AGENTS.md doesn't exist in this repo today; excluded defensively.)
+    "CLAUDE.md"
+    "AGENTS.md"
     # Instalar.bat predates Instalar.exe (v1.0.19, same behaviour, carries the gear
     # icon in Explorer). Both were shipping side by side with nothing telling a
     # banca worker which to use - confirmed source of "2 instalar, no se cual usar"
