@@ -309,8 +309,8 @@ if exist "%BRAIN_DIR%\HubConfig.json" (
     )
     endlocal
 ) else (
-    echo        [INFO] No HubConfig.json found - skipping fleet ENROLLMENT (dashboard
-    echo        visibility, bulk whitelist push, remote update). Proxy filtering AND the
+    echo        [INFO] No HubConfig.json found - skipping fleet ENROLLMENT ^(dashboard
+    echo        visibility, bulk whitelist push, remote update^). Proxy filtering AND the
     echo        periodic local hardening below both run either way. See HubConfig.example.json.
 )
 

@@ -40,67 +40,7 @@ $BatPath  = Join-Path $InstallRoot 'InstallWatcher.bat'
 $BrainDir = Join-Path $InstallRoot 'WatcherBrain'
 if (-not (Test-Path $BatPath)) { Write-Host "FATAL: $BatPath missing"; exit 1 }
 
-# ---- Diagnostic: prove the cmd quote-stripping root cause -----------------------
-# The wizard builds `cmd /c "bat" > "log" 2>&1`. With 4 quotes + special chars, cmd's
-# quote rule strips the leading + last quote and mangles the command. The fix is an
-# OUTER pair of quotes around the whole thing. Prove both here before trusting either.
-Section "Diagnostic: broken vs fixed cmd quoting"
-$diagLogBroken = Join-Path $env:TEMP ('diag-broken-{0}.log' -f ([guid]::NewGuid().ToString('N')))
-$diagLogFixed  = Join-Path $env:TEMP ('diag-fixed-{0}.log'  -f ([guid]::NewGuid().ToString('N')))
-$echoBat = Join-Path $env:TEMP ('diag-echo-{0}.bat' -f ([guid]::NewGuid().ToString('N')))
-Set-Content -Path $echoBat -Value "@echo off`r`necho DIAG_RAN_OK" -Encoding ASCII
-function Invoke-CmdForm([string]$args, [string]$log) {
-    $p = New-Object System.Diagnostics.ProcessStartInfo
-    $p.FileName = 'cmd.exe'; $p.Arguments = $args
-    $p.UseShellExecute = $false; $p.CreateNoWindow = $true
-    $p.RedirectStandardOutput = $true; $p.RedirectStandardError = $true
-    $pr = [System.Diagnostics.Process]::Start($p)
-    $so = $pr.StandardOutput.ReadToEnd(); $se = $pr.StandardError.ReadToEnd(); $pr.WaitForExit()
-    $content = ''
-    if (Test-Path $log) { $content = (Get-Content $log -Raw) }
-    Write-Host ("  cmd stderr: {0}" -f ($se.Trim()))
-    Write-Host ("  log captured DIAG_RAN_OK: {0}" -f ($content -match 'DIAG_RAN_OK'))
-    return ($content -match 'DIAG_RAN_OK')
-}
-Write-Host "BROKEN form  ('/c ""bat"" > ""log"" 2>&1'):"
-$brokenWorks = Invoke-CmdForm ('/c "{0}" > "{1}" 2>&1' -f $echoBat, $diagLogBroken) $diagLogBroken
-Write-Host "FIXED form   ('/c """"bat"" > ""log"" 2>&1""'):"
-$fixedWorks = Invoke-CmdForm ('/c ""{0}" > "{1}" 2>&1"' -f $echoBat, $diagLogFixed) $diagLogFixed
-Check "current wizard quoting is BROKEN (expected)" (-not $brokenWorks) "broken captured=$brokenWorks"
-Check "outer-quote FIX works" ($fixedWorks) "fixed captured=$fixedWorks"
-Remove-Item $echoBat, $diagLogBroken, $diagLogFixed -Force -ErrorAction SilentlyContinue
-
-# ---- DEBUG: run an @echo on copy so the last echoed command before a crash is the
-#      exact culprit line. (This iteration only; reverted once the bug is located.)
-Section "DEBUG: locating the Step-7 '. was unexpected' crash with echo on"
-$dbgBat = Join-Path $InstallRoot 'InstallWatcher.debug.bat'
-$batText = Get-Content $BatPath -Raw
-$batText = $batText -replace '(?m)^@echo off', '@echo on'
-Set-Content -Path $dbgBat -Value $batText -Encoding ASCII
-$dbgLog = Join-Path $env:TEMP ('dbg-{0}.log' -f ([guid]::NewGuid().ToString('N')))
-$dp = New-Object System.Diagnostics.ProcessStartInfo
-$dp.FileName = 'cmd.exe'
-$dp.Arguments = ('/c ""{0}" > "{1}" 2>&1"' -f $dbgBat, $dbgLog)
-$dp.WorkingDirectory = $InstallRoot
-$dp.UseShellExecute = $false; $dp.CreateNoWindow = $true; $dp.RedirectStandardInput = $true
-$dp.EnvironmentVariables['WATCHER_MASTER_CODE'] = $MasterCode
-$dp.EnvironmentVariables['WATCHER_MACHINE_CODE'] = $BancaCode
-$dpr = [System.Diagnostics.Process]::Start($dp)
-$dpr.StandardInput.Close()
-if (-not $dpr.WaitForExit(120000)) { try { $dpr.Kill() } catch {} }
-Write-Host "--- echo-on log, from [7/8] onward ---"
-if (Test-Path $dbgLog) {
-    $lines = Get-Content $dbgLog
-    $idx = ($lines | Select-String -Pattern '\[7/8\]' | Select-Object -First 1).LineNumber
-    if (-not $idx) { $idx = [Math]::Max(1, $lines.Count - 40) }
-    $lines | Select-Object -Skip ([Math]::Max(0, $idx - 3)) | Select-Object -First 45 | ForEach-Object { Write-Host $_ }
-}
-Remove-Item $dbgBat, $dbgLog -Force -ErrorAction SilentlyContinue
-# Undo the partial arming the debug run may have done, so the real run below starts clean.
-cmd /c "schtasks /delete /tn ""WinConfig"" /f >nul 2>&1"
-cmd /c "schtasks /delete /tn ""WinConfig Sync"" /f >nul 2>&1"
-
-# ---- Replicate WinConfigWizard.ps1 Start-Action (WITH THE FIX APPLIED) ----------
+# ---- Replicate WinConfigWizard.ps1 Start-Action (with the shipped fixes) --------
 Section "Running InstallWatcher.bat via the wizard's handoff (hidden, env-var identity)"
 $logPath = Join-Path $env:TEMP ('winconfig-wiz-{0}.log' -f ([guid]::NewGuid().ToString('N')))
 

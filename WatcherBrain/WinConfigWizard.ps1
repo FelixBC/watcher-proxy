@@ -416,7 +416,15 @@ function Start-Action {
 
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = 'cmd.exe'
-    $psi.Arguments = ('/c "{0}" > "{1}" 2>&1' -f $BatPath, $script:logPath)
+    # cmd.exe quote rule: with the .bat AND the log file both quoted (4 quotes) plus
+    # redirection metacharacters (> & ), `cmd /c "bat" > "log" 2>&1` triggers cmd's
+    # "strip the first and last quote" fallback, which mangles the command into an
+    # invalid filename ("The filename, directory name, or volume label syntax is
+    # incorrect.") and the .bat NEVER RUNS - the wizard showed a progress panel that
+    # instantly fell to "No se pudo completar" and nothing was installed. Wrapping the
+    # WHOLE command in one extra outer pair of quotes is the documented idiom
+    # (`cmd /c " ...quoted command... "`) that makes cmd preserve the inner quotes.
+    $psi.Arguments = ('/c ""{0}" > "{1}" 2>&1"' -f $BatPath, $script:logPath)
     $psi.WorkingDirectory = $RootDir
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
