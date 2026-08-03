@@ -18,14 +18,23 @@ committed separately and does not update itself from source changes.
 - `Instalar.cs` — the launcher source (runs `wscript WatcherBrain\RunWizardHidden.vbs Install`).
 - `winconfig.ico` — the embedded icon (white gear on the #0f6cbd accent, "WinConfig" disguise).
 
+- `Instalar.manifest` - the embedded application manifest. `requireAdministrator` is
+  the point: UAC prompts on "Instalar" (with this icon) instead of on a bare
+  PowerShell relaunch, and the wizard then shows with no second prompt.
+
 ## Rebuild (on a Windows machine with .NET Framework)
 
 ```
-csc /nologo /target:winexe /win32icon:winconfig.ico /out:..\..\Instalar.exe Instalar.cs
+csc /nologo /target:winexe /win32icon:winconfig.ico /win32manifest:Instalar.manifest /out:..\..\Instalar.exe Instalar.cs
 ```
 
-`csc.exe` ships with .NET Framework at
+The `/win32manifest:` flag MUST be present - without it the exe is not elevated and
+the whole "UAC on Instalar" behaviour is lost. `csc.exe` ships with .NET Framework at
 `C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe`. The `winconfig.ico` was
 generated with System.Drawing (256px gear); regenerate it there if the look needs to change.
+
+CI rebuilds and verifies this exe automatically (`.github/workflows/installer-repro.yml`,
+job `build-exe`) - it compiles with the manifest, checks the `requireAdministrator`
+string is embedded, and uploads the binary as an artifact.
 
 This folder is excluded from the install bundle (see `scripts/build-winconfig-bundle.sh`).

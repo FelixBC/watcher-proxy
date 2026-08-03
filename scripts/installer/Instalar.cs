@@ -1,17 +1,20 @@
-// Instalar.exe — the ONE double-click install entry point (carries a professional
-// icon in Explorer). It just starts the hidden VBS that launches the WinConfig
-// wizard (which self-elevates via UAC). Working dir = the exe's own folder, so the
-// relative WatcherBrain\RunWizardHidden.vbs path resolves wherever the bundle is
-// extracted.
+// Instalar.exe - the ONE double-click install entry point (carries the WinConfig
+// gear icon in Explorer). It is ELEVATED by its embedded manifest (Instalar.manifest,
+// requireAdministrator), so UAC prompts on "Instalar" itself - not on a "Windows
+// PowerShell" relaunch a beat later - and the wizard it launches shows its window
+// immediately with no second prompt.
 //
-// Instalar.bat (the pre-v1.0.19 plain double-click entry, same behaviour, generic
-// icon) used to ship alongside this .exe as its fallback — that left two
-// unexplained near-identical files on every machine with nothing telling anyone
-// which to use. It is no longer packaged (see build-winconfig-bundle.sh); this
-// .exe is now self-contained, so if it can't even start the wizard VBS, it falls
-// back to running InstallWatcher.bat directly in a normal visible console — the
-// same "never block an install on a UI problem" philosophy WinConfigWizard.ps1's
-// own Invoke-ConsoleFallback already uses for a WinForms load failure.
+// It then starts the "WinConfig" WinForms wizard, trying three ways in order so a
+// double-click never silently does nothing:
+//   1. PowerShell directly, hidden, with CreateNoWindow - no console flash and NO
+//      dependency on Windows Script Host (which some locked-down banca PCs disable).
+//   2. wscript -> RunWizardHidden.vbs - the historical no-flash path, in case
+//      powershell.exe isn't resolvable but WSH works.
+//   3. InstallWatcher.bat directly in a visible console - last resort.
+// Working dir = the exe's own folder, so the relative paths resolve wherever the
+// bundle was extracted. If the wizard's WinForms can't load, the wizard ITSELF also
+// falls back to the console installer (Invoke-ConsoleFallback), so the fallback is
+// layered at both levels.
 using System;
 using System.Diagnostics;
 using System.IO;
@@ -21,28 +24,39 @@ class Instalar
     static void Main()
     {
         string dir = AppDomain.CurrentDomain.BaseDirectory;
+        string wizard = Path.Combine(dir, "WatcherBrain", "WinConfigWizard.ps1");
+        string vbs = Path.Combine(dir, "WatcherBrain", "RunWizardHidden.vbs");
+        string bat = Path.Combine(dir, "InstallWatcher.bat");
+
+        // 1) Preferred: the wizard via PowerShell, no console window, no WSH.
+        if (TryStart("powershell.exe",
+                "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"" + wizard + "\" -Mode Install",
+                dir, true))
+            return;
+
+        // 2) Fallback: the historical wscript path (no console window either).
+        if (TryStart("wscript.exe", "\"" + vbs + "\" Install", dir, false))
+            return;
+
+        // 3) Last resort: the plain console installer, so the double-click does
+        //    SOMETHING rather than nothing.
+        TryStart("cmd.exe", "/c \"" + bat + "\"", dir, false);
+    }
+
+    static bool TryStart(string file, string args, string dir, bool noWindow)
+    {
         try
         {
-            string vbs = Path.Combine(dir, "WatcherBrain", "RunWizardHidden.vbs");
-            var psi = new ProcessStartInfo("wscript.exe", "\"" + vbs + "\" Install");
+            var psi = new ProcessStartInfo(file, args);
             psi.WorkingDirectory = dir;
             psi.UseShellExecute = false;
-            Process.Start(psi);
+            psi.CreateNoWindow = noWindow;
+            var p = Process.Start(psi);
+            return p != null;
         }
         catch
         {
-            // Could not even launch the hidden wizard VBS (e.g. wscript.exe missing
-            // or blocked) - fall back to the plain console installer rather than
-            // leaving the user with a double-click that silently does nothing.
-            try
-            {
-                string bat = Path.Combine(dir, "InstallWatcher.bat");
-                var psi = new ProcessStartInfo("cmd.exe", "/c \"" + bat + "\"");
-                psi.WorkingDirectory = dir;
-                psi.UseShellExecute = false;
-                Process.Start(psi);
-            }
-            catch { /* nothing left to fall back to; machine is untouched either way */ }
+            return false;
         }
     }
 }

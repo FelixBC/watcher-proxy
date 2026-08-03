@@ -48,3 +48,38 @@ jobs:
           foreach ($f in @('C:\WinConfig\WatcherBrain\wizard-error.log','C:\WinConfig\WatcherBrain\register-status.txt','C:\WinConfig\WatcherBrain\events.log')) {
             if (Test-Path $f) { Write-Host "----- $f -----"; Get-Content $f -Raw }
           }
+
+  build-exe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile Instalar.exe with the elevation manifest
+        shell: powershell
+        run: |
+          $csc = Get-ChildItem 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe' -ErrorAction SilentlyContinue
+          if (-not $csc) { $csc = Get-ChildItem 'C:\Windows\Microsoft.NET\Framework\v4.0.30319\csc.exe' -ErrorAction SilentlyContinue }
+          if (-not $csc) { throw "csc.exe (.NET Framework) not found" }
+          Write-Host "Using $($csc.FullName)"
+          Push-Location scripts\installer
+          & $csc.FullName /nologo /target:winexe /win32icon:winconfig.ico /win32manifest:Instalar.manifest /out:Instalar.exe Instalar.cs
+          if ($LASTEXITCODE -ne 0) { throw "csc failed ($LASTEXITCODE)" }
+          Pop-Location
+
+      - name: Verify PE + embedded requireAdministrator
+        shell: powershell
+        run: |
+          $exe = 'scripts\installer\Instalar.exe'
+          if (-not (Test-Path $exe)) { throw "exe not produced" }
+          $bytes = [IO.File]::ReadAllBytes($exe)
+          if ($bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) { throw "not a PE (no MZ header)" }
+          $text = [Text.Encoding]::UTF8.GetString($bytes)
+          if ($text -notmatch 'requireAdministrator') { throw "manifest NOT embedded (requireAdministrator missing)" }
+          Write-Host ("OK - {0} bytes, MZ header present, requireAdministrator embedded." -f $bytes.Length)
+
+      - name: Upload Instalar.exe artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Instalar-exe
+          path: scripts/installer/Instalar.exe
+          if-no-files-found: error
