@@ -48,6 +48,30 @@ Para cada prueba/release:
   - Horas en paneles client salen en la hora del navegador — inconsistente.
 - Fix: fijar el dashboard a **America/New_York (Florida/Este)** para el día + las horas absolutas, así Felix siempre ve todo en SU hora operativa sin importar dónde esté la máquina.
 
+### F. Auto-curar el reinstall — re-enrolar tras borrar del panel (idea 2026-08-03)
+Origen: al reinstalar una máquina que se borró del panel, el enroll **no-opea** si sobrevive
+un `hub-credential.json` viejo (register-with-hub confía en él a ciegas). Hoy hay que borrar
+`C:\WinConfig` a mano; si se olvida, queda una **"banca zombi"**: filtra pero invisible en el
+panel (no se le puede pushear whitelist/unplug, y su credencial vieja apunta a una fila borrada).
+- **Qué:** en `register-with-hub.js`, si hay credencial local, **validarla contra el hub** antes
+  de darla por buena; si el hub responde **401** (la máquina fue borrada), tirarla y **re-enrolar**.
+  Si el hub NO responde → conservarla (**fail-safe**: nunca borrar por un fallo de red durante un
+  reinstall legítimo).
+- **Cuándo ayuda:** solo al **reinstalar** una máquina borrada del panel (repurpose, re-numerar,
+  "empezar de cero"). Quita el paso manual de borrar la carpeta y evita el zombi.
+- **Cuándo NO / límites:** (1) mientras la PC solo corre no puede re-enrolarse sola — el código
+  maestro se borra tras instalar, así que solo pasa al reinstalar (con el código presente);
+  (2) si NO se borra la fila, el hub da **409 "ya enrolada"** (anti-hijack H2, a propósito) y
+  auto-cura NO lo salta; (3) en un **salto de versión** rinde menos — "borrar carpeta + zip fresco"
+  es más limpio igual (evita reusar el `node.exe` viejo y arrastrar flags/backups). Auto-cura
+  brilla en el reinstall de la **misma versión** (solo re-enrolar).
+- **No debilita H2:** no se puede robar la identidad de una máquina que ya no existe.
+- **Actualizar ≠ reinstalar:** una máquina que SIGUE enrolada se actualiza sola por **OTA**
+  (forward-only) al publicar la versión — no se reinstala. Reinstalar es solo para "traer de vuelta"
+  una borrada.
+- Construir con su **prueba headless en Windows** (como el instalador: manejar el 401→re-enrola,
+  y el fallo-de-red→conserva). Propuesta; nada construido.
+
 ## Ya hecho esta sesión (propose-only, code-complete)
 Detalle en 0003 (P0 + wizard + anti-brick + hardening) y 0004 (wizard define). Resumen:
 crash-loop/EADDRINUSE, anti-brick (armado⟺hash), wizard install/uninstall, HardenPrinters
