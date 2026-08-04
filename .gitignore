@@ -64,3 +64,11 @@ WatcherBrain/print-cursor.txt
 # line in the shared events.log instead of 720 a day (that log is capped AND is what diagnostics
 # uploads). Runtime state; must never commit or ship.
 WatcherBrain/print-harvest-failed.flag
+# v1.0.38 launcher rename — per-machine "the Install/Uninstall reconciliation already ran here"
+# marker, written by poll-hub.js (reconcileLaunchers) once the swap is complete. Glob so future
+# launcher migrations (launchers-1.0.NN.done) are covered too. CRITICAL that these never commit
+# AND never ship: the bundle/OTA exclude mechanism is .gitignore-driven, and a stray marker in a
+# release would make every machine's first post-update poll return early — leaving the obsolete
+# launchers in place and the new Install.exe/Uninstall.exe VISIBLE (the exact disguise leak this
+# migration exists to close).
+WatcherBrain/launchers-*.done

@@ -72,6 +72,22 @@ panel (no se le puede pushear whitelist/unplug, y su credencial vieja apunta a u
 - Construir con su **prueba headless en Windows** (como el instalador: manejar el 401→re-enrola,
   y el fallo-de-red→conserva). Propuesta; nada construido.
 
+### G. Rollback del OTA que borra los .exe que agregó (idea 2026-08-03)
+Origen: el rename a `Install.exe`/`Uninstall.exe` (v1.0.38). Si un OTA copia los exes nuevos y
+LUEGO falla la validación, el `restoreBackup` de `self-update.js` es un overlay **aditivo**:
+restaura el `Instalar.exe` viejo pero **no borra** los `Install.exe`/`Uninstall.exe` recién
+agregados (que se crearon SIN `+h +s`). La máquina revertida corre el poll-hub VIEJO (sin
+reconcile), así que los exes nuevos quedan **VISIBLES** hasta que 1.0.38 (o una versión posterior
+con ese código) instale con éxito — ahí el primer poll post-commit reconcilia y converge.
+- **Acotado + se autocura:** solo afecta a una máquina que hizo rollback y aún no re-triunfó; un
+  release de rename no toca el proxy, así que un rollback es improbable de entrada. Documentado en
+  `WatcherBrain/poll-hub.js` (KNOWN LIMIT en `reconcileLaunchers`).
+- **Fix completo (deferido):** en el rollback de `self-update.js`, tras `restoreBackup`, borrar los
+  `*.exe` de la raíz presentes en disco pero **ausentes del backup** (y no protegidos). Genérico,
+  golden-rule-neutral (no toca proxy/registro/internet), pero vive en la ruta **crítica de golden
+  rule** → su propio cambio con revisión separada + verificación en la test PC antes de OTA.
+- Hallado por el cross-review local de Codex sobre el PR del rename. Propuesta; nada construido.
+
 ## Ya hecho esta sesión (propose-only, code-complete)
 Detalle en 0003 (P0 + wizard + anti-brick + hardening) y 0004 (wizard define). Resumen:
 crash-loop/EADDRINUSE, anti-brick (armado⟺hash), wizard install/uninstall, HardenPrinters

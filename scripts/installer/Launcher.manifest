@@ -1,12 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Embedded application manifest for Instalar.exe. The one thing that matters here
+<!-- Embedded application manifest for the shared launcher, shipped as Install.exe
+     and Uninstall.exe (both built from Launcher.cs). The one thing that matters here
      is requireAdministrator: it makes the UAC prompt fire on the thing the user
-     actually double-clicked ("Instalar", carrying the WinConfig gear icon) instead
-     of on a raw "Windows PowerShell" relaunch a beat later - better UX AND it keeps
-     the WinConfig disguise intact. Because the exe is already elevated, the wizard
-     it launches shows its window immediately with no second UAC prompt. -->
+     actually double-clicked ("Install"/"Uninstall", carrying the WinConfig gear
+     icon) instead of on a raw "Windows PowerShell" relaunch a beat later - better UX
+     AND it keeps the WinConfig disguise intact. Because the exe is already elevated,
+     the wizard it launches shows its window immediately with no second UAC prompt. -->
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <assemblyIdentity version="1.0.0.0" name="WinConfig.Instalar" type="win32" />
+  <assemblyIdentity version="1.0.0.0" name="WinConfig.Launcher" type="win32" />
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
       <requestedPrivileges>

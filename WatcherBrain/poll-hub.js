@@ -16,7 +16,7 @@
 const fs = require('fs');
 const path = require('path');
 const net = require('net');
-const { execSync } = require('child_process');
+const { execSync, execFileSync } = require('child_process');
 
 const { BRAIN_DIR, readHubConfig, readCredential, postJson, getText } = require('./hub-client');
 const { applyPushedWhitelist, getReportableExtras } = require('./whitelist-merge');
@@ -846,6 +846,106 @@ function triggerSelfUpdate(version, url, sha256) {
     child.unref();
 }
 
+// --- Launcher reconciliation (Install/Uninstall rename, v1.0.38) ---------------
+// The double-click launchers were renamed to Install.exe / Uninstall.exe (from the
+// old Instalar.exe / Restaurar.bat). This migration CANNOT live in self-update.js:
+// during the OTA that ships 1.0.38 the running process is still the OLD self-update.js
+// (Node loaded it at startup), and afterwards VERSION already equals the new version
+// so self-update returns early and never runs again. The poll task, by contrast, is a
+// FRESH SYSTEM process every ~2 min, so the first poll AFTER the update runs THIS (new)
+// code — the only reliable place for a post-update file migration.
+//   1. Delete the obsolete launchers OTA leaves behind — copyTree only adds/overwrites,
+//      it never removes a file absent from the new bundle, so the old names would linger
+//      next to the new ones ("two files, which do I use?").
+//   2. Re-hide the current launchers with +h +s — OTA's copyFileSync CREATES the new
+//      Install.exe/Uninstall.exe WITHOUT the disguise attributes a fresh install applies
+//      (InstallWatcher.bat hides every file but abracadabra.bat), so an OTA-added launcher
+//      would otherwise sit VISIBLE at the install root.
+// Idempotent + marker-gated (one-time cost). SYSTEM-only, no credential, no network —
+// exactly like reassertHardeningIfDue — so it runs ABOVE the not-enrolled guard: a
+// machine that failed to enroll still polls and still needs its launchers reconciled.
+// Fully wrapped so launcher cleanup can never break a poll. NOT a golden-rule concern:
+// it touches no proxy process, registry, or internet setting.
+//
+// KNOWN LIMIT (accepted, self-healing — deferred fix, see docs/plans/0005): if the 1.0.38 OTA
+// copies the new exes and then FAILS validation, self-update's rollback (restoreBackup) is an
+// additive overlay — it restores the old Instalar.exe but does NOT remove the just-added
+// Install.exe/Uninstall.exe, which self-update created WITHOUT +h +s. The rolled-back machine
+// then runs the OLD poll-hub (no reconcile), so the new exes sit VISIBLE until 1.0.38 (or a later
+// version carrying this code) SUCCESSFULLY lands — at which point the first post-commit poll runs
+// reconcile and converges (deletes Instalar.exe, hides both). So the leak is bounded to a
+// rolled-back-and-not-yet-resucceeded machine and heals itself on the next successful update; a
+// launcher-rename release doesn't touch the proxy, so a rollback is unlikely to begin with. The
+// COMPLETE fix (rollback removes root *.exe absent from the backup) lives in self-update.js's
+// golden-rule-critical rollback path and is filed as its own change — deliberately NOT folded in
+// here to keep this migration out of the OTA rollback engine.
+const LAUNCHER_MIGRATION_MARKER = path.join(BRAIN_DIR, 'launchers-1.0.38.done');
+const UPDATING_FLAG_PATH = path.join(BRAIN_DIR, 'updating.flag');
+// Coupled to the .ps1 watchdog layers' STALE_FLAG_MINUTES (CheckAndStartProxy.ps1 /
+// SetProxyByAvailability.ps1) and self-update.js's health window — keep the three in step.
+const STALE_UPDATING_FLAG_MS = 15 * 60 * 1000;
+// updating.flag is "active" only while FRESH. self-update writes it (mtime = now) from before it
+// copies the new tree until it commits/rolls-back (cleared in its finally). But if self-update is
+// KILLED or the machine loses power after writing the new VERSION and before that finally runs, the
+// flag is orphaned — and since VERSION already matches, no same-version update ever runs to clear
+// it. An existence-only gate would then skip reconcile FOREVER. So mirror the watchdog: a flag older
+// than STALE_UPDATING_FLAG_MS is treated as ABSENT, letting an orphaned update self-heal on the next
+// poll. mtimeMs and Date.now() are both absolute epoch ms, so the subtraction is timezone-safe.
+function isUpdatingActive() {
+    try {
+        const ageMs = Date.now() - fs.statSync(UPDATING_FLAG_PATH).mtimeMs;
+        return ageMs <= STALE_UPDATING_FLAG_MS;
+    } catch (e) {
+        return false; // absent or unreadable → not updating
+    }
+}
+function reconcileLaunchers() {
+    try {
+        if (fs.existsSync(LAUNCHER_MIGRATION_MARKER)) return; // already reconciled here
+        // Never reconcile mid-cutover. A poll firing during self-update's ~minutes-long validation
+        // window (polls every ~2 min, update up to ~5) would load the new code, see both exes
+        // already copied, hide them and write the marker BEFORE cutover; if validation then rolled
+        // back to the old launchers, the marker would survive and permanently skip the real
+        // reconcile after a later retry. Gate on a FRESH updating.flag (stale = crashed update,
+        // treated as absent so it self-heals). Reconcile runs on the first poll after a clean commit.
+        if (isUpdatingActive()) return;
+        const rootDir = path.join(BRAIN_DIR, '..');
+
+        for (const name of ['Instalar.exe', 'Instalar.bat', 'Restaurar.bat']) {
+            try {
+                const p = path.join(rootDir, name);
+                if (fs.existsSync(p)) fs.unlinkSync(p); // +h+s never blocks unlink
+            } catch (e) { /* best-effort; a stale shim is harmless */ }
+        }
+
+        // Full path to attrib.exe — a bare 'attrib' can fail to resolve under SYSTEM's
+        // PATH; System32 is always present.
+        const attribExe = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'attrib.exe');
+        let bothPresent = true;
+        let hideFailed = false;
+        for (const name of ['Install.exe', 'Uninstall.exe']) {
+            const p = path.join(rootDir, name);
+            if (fs.existsSync(p)) {
+                try { execFileSync(attribExe, ['+h', '+s', p], { windowsHide: true, timeout: 8000 }); }
+                catch (e) { hideFailed = true; }
+            } else {
+                bothPresent = false; // one launcher not copied yet — don't latch on a partial swap
+            }
+        }
+
+        // Latch ONLY once BOTH new launchers are present AND hidden cleanly. copyTree is an
+        // additive, non-atomic overlay: an interrupted OTA can land ONE launcher before a poll
+        // fires. Latching on "any present" would hide that one, mark done, and then never
+        // re-hide the second launcher a later retry adds — leaving it VISIBLE forever. Requiring
+        // both (fail-closed: whole set or nothing) makes such a machine re-check next poll, so
+        // it converges only when the swap is actually complete. A machine that polled before the
+        // swap (both names absent) or hit a transient attrib failure re-checks the same way.
+        if (bothPresent && !hideFailed) {
+            try { fs.writeFileSync(LAUNCHER_MIGRATION_MARKER, new Date().toISOString(), 'utf-8'); } catch (e) {}
+        }
+    } catch (e) { /* never let launcher cleanup break the poll */ }
+}
+
 async function main() {
     const cred = readCredential();
 
@@ -862,6 +962,12 @@ async function main() {
     // so it has no periodic trigger here at all — plan 0010 §Límites (the shipped bundle
     // always includes HubConfig.json, so this is an edge/manual config, not a real banca).
     reassertHardeningIfDue();
+
+    // One-time launcher rename cleanup (Install/Uninstall, v1.0.38). Same rationale as
+    // the hardening re-assert above: a purely LOCAL, SYSTEM-only, no-credential/no-network
+    // property, so it must run ABOVE the not-enrolled guard — a machine that failed to
+    // enroll still polls and still needs its old launchers removed + new ones hidden.
+    reconcileLaunchers();
 
     // Not enrolled (no credential on disk). We deliberately do NOT try to
     // re-register here: enrollment needs the plaintext master code, which is

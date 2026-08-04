@@ -8,7 +8,7 @@ name: installer-repro
 on:
   workflow_dispatch:
   push:
-    branches: [fix/installer-visual]
+    branches: [fix/installer-visual, feature/uninstall-visual]
   pull_request:
     paths:
       - 'InstallWatcher.bat'
@@ -73,7 +73,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Compile Instalar.exe with the elevation manifest
+      - name: Compile the launcher, then stamp it as Install.exe and Uninstall.exe
         shell: powershell
         run: |
           $csc = Get-ChildItem 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe' -ErrorAction SilentlyContinue
@@ -81,26 +81,53 @@ jobs:
           if (-not $csc) { throw "csc.exe (.NET Framework) not found" }
           Write-Host "Using $($csc.FullName)"
           Push-Location scripts\installer
-          & $csc.FullName /nologo /target:winexe /win32icon:winconfig.ico /win32manifest:Instalar.manifest /out:Instalar.exe Instalar.cs
+          # ONE source (Launcher.cs) -> ONE binary -> TWO renamed copies. The exe picks
+          # Install vs Uninstall from its OWN file name at runtime, so the two shipped
+          # launchers are byte-identical and cannot drift.
+          & $csc.FullName /nologo /target:winexe /win32icon:winconfig.ico /win32manifest:Launcher.manifest /out:Launcher.exe Launcher.cs
           if ($LASTEXITCODE -ne 0) { throw "csc failed ($LASTEXITCODE)" }
+          Copy-Item Launcher.exe Install.exe -Force
+          Copy-Item Launcher.exe Uninstall.exe -Force
           Pop-Location
 
-      - name: Verify PE + embedded requireAdministrator
+      - name: Verify both exes (PE + embedded requireAdministrator)
         shell: powershell
         run: |
-          $exe = 'scripts\installer\Instalar.exe'
-          if (-not (Test-Path $exe)) { throw "exe not produced" }
-          $bytes = [IO.File]::ReadAllBytes($exe)
-          if ($bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) { throw "not a PE (no MZ header)" }
-          $text = [Text.Encoding]::UTF8.GetString($bytes)
-          if ($text -notmatch 'requireAdministrator') { throw "manifest NOT embedded (requireAdministrator missing)" }
-          Write-Host ("OK - {0} bytes, MZ header present, requireAdministrator embedded." -f $bytes.Length)
+          foreach ($name in @('Install.exe','Uninstall.exe')) {
+            $exe = "scripts\installer\$name"
+            if (-not (Test-Path $exe)) { throw "$name not produced" }
+            $bytes = [IO.File]::ReadAllBytes($exe)
+            if ($bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) { throw "$name is not a PE (no MZ header)" }
+            $text = [Text.Encoding]::UTF8.GetString($bytes)
+            if ($text -notmatch 'requireAdministrator') { throw "$name manifest NOT embedded (requireAdministrator missing)" }
+            Write-Host ("OK - {0}: {1} bytes, MZ header present, requireAdministrator embedded." -f $name, $bytes.Length)
+          }
 
-      - name: Upload Instalar.exe artifact
+      - name: Confirm the shipped launchers are committed at the repo root
+        shell: powershell
+        run: |
+          # The binaries that actually ship live at the repo root (git-tracked), built
+          # from Launcher.cs per scripts/installer/README.md. This job proves the SOURCE
+          # still compiles into a valid elevated PE; it does not byte-compare against the
+          # committed copies (Framework csc here vs. the Roslyn build used to produce the
+          # committed exes are not bit-identical). Just assert both are present so a
+          # rename/removal can't silently drop a shipped launcher.
+          foreach ($name in @('Install.exe','Uninstall.exe')) {
+            if (-not (Test-Path ".\$name")) { throw "$name is not committed at the repo root" }
+            $bytes = [IO.File]::ReadAllBytes(".\$name")
+            if ($bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) { throw "committed $name is not a PE" }
+            $text = [Text.Encoding]::UTF8.GetString($bytes)
+            if ($text -notmatch 'requireAdministrator') { throw "committed $name is not elevated (requireAdministrator missing)" }
+            Write-Host ("OK - committed $name present, PE, elevated.")
+          }
+
+      - name: Upload the launcher exes artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Instalar-exe
-          path: scripts/installer/Instalar.exe
+          name: winconfig-launchers
+          path: |
+            scripts/installer/Install.exe
+            scripts/installer/Uninstall.exe
           if-no-files-found: error
 
   build-bundle:

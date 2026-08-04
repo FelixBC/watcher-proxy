@@ -6,8 +6,9 @@ este documento es para quien **mantiene** el agente. Agrupa los archivos de
 agente en runtime **no** están en git; ver la última sección.)
 
 ## Raíz del paquete
-- `InstallWatcher.bat` — instalador principal (registra tareas, servicio, exclusión AV, registra con el hub).
-- `BackToNormal.bat` — desinstala / desactiva y devuelve el internet a normal.
+- `Install.exe` / `Uninstall.exe` — los dos puntos de entrada de doble clic (icono WinConfig, elevados por manifiesto). Abren el asistente visual (`WatcherBrain/WinConfigWizard.ps1`) en modo Install/Uninstall. Ambos se compilan de UN solo `scripts/installer/Launcher.cs` (mismos bytes; cada copia decide su modo por su propio nombre de archivo).
+- `InstallWatcher.bat` — instalador principal (registra tareas, servicio, exclusión AV, registra con el hub). Lo corre el asistente por debajo; también sirve como fallback en consola.
+- `BackToNormal.bat` — desinstala / desactiva y devuelve el internet a normal. Es el motor del modo Uninstall del asistente (nombre interno sin cambiar; la puerta de doble clic es `Uninstall.exe`).
 - `whitelist.txt` — sitios permitidos **por máquina** (se edita libremente; el hub nunca lo sobrescribe).
 - `README.txt` — guía del usuario/instalador.
 - `VERSION` — versión del agente (la lee `self-update.js` y `publish-agent.mjs`).
