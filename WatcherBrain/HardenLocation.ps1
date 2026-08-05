@@ -1,6 +1,6 @@
 # Keep a banca's LOCATION reporting to the hub, and treat turning it off as tamper.
 # The fleet needs each station's location; Windows lets a user (or a cleaner tool)
-# silently kill it four ways, so force + re-assert all four, exactly like
+# silently kill it five ways, so force + re-assert all five, exactly like
 # HardenPower.ps1 / HardenPrinters.ps1 do for their settings (verified on the test
 # PC, Win11 build 26200 — the "on" values below are Allow / Status=1 / Automatic+
 # Running / GPO absent):
@@ -9,6 +9,8 @@
 #   3. The Geolocation service (lfsvc): Configuration\Status = 1, service Automatic + Running
 #   4. Group Policy "Turn off location": Policies\...\LocationAndSensors DisableLocation must be 0/absent
 #      (DisableLocation=1 overrides the consent keys no matter what, so it MUST be cleared).
+#   5. PER-USER consent: HKU\<user>\...\ConsentStore\location Value = Allow — the toggle a user flips
+#      in Settings is the per-user one, so HKLM='Allow' alone is NOT enough if HKU\<user>='Deny'.
 # Registry ground-truth over the Settings UI, same discipline as HardenPower.ps1.
 #
 # Always ELEVATED (HKLM writes + Set-Service need it): at install from InstallWatcher
@@ -109,6 +111,29 @@ if ($null -ne $gpo -and [int]$gpo -ne 0) {
     $changed = $true; $details += 'gpo-disablelocation'
 }
 
+# --- 5: PER-USER consent. The "Location services" toggle a user actually flips in Settings is the
+# PER-USER ConsentStore key, NOT the machine-wide one in step 1 — a machine can read HKLM='Allow'
+# while HKU\<user>='Deny', which turns location OFF for that user and gives GetLocation no fix.
+# Enforce it for every LOADED user hive (the banca user + SYSTEM). Only touch hives that ALREADY
+# have the key and only flip a confirmed 'Deny' — never create one where Windows didn't. SYSTEM
+# (this process) can write any loaded hive; a banca stays logged on for days so its hive is loaded.
+$UserConsentRel = 'SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location'
+foreach ($hive in (Get-ChildItem 'Registry::HKEY_USERS' -ErrorAction SilentlyContinue)) {
+    $sid = $hive.PSChildName
+    if ($sid -match '_Classes$') { continue }
+    if ($sid -ne 'S-1-5-18' -and $sid -notmatch '^S-1-5-21-') { continue }
+    $ukey = "Registry::HKEY_USERS\$sid\$UserConsentRel"
+    if (-not (Test-Path -LiteralPath $ukey)) { continue }
+    $ucur = (Get-ItemProperty -LiteralPath $ukey -Name 'Value' -ErrorAction SilentlyContinue).Value
+    # Only fix an explicit 'Deny' — a user hive is theirs; don't overwrite 'Prompt' or an unknown/
+    # corrupt value (Codex P1). 'Deny' is the clear "location off" state and the only tamper here.
+    if ($ucur -eq 'Deny') {
+        $confirmedRevert = $true
+        Set-ItemProperty -LiteralPath $ukey -Name 'Value' -Value 'Allow' -Type String
+        $changed = $true; $details += 'user-consent'
+    }
+}
+
 # --- Verify the enforcement actually took (re-read), only if we wrote something. ---
 if ($changed) {
     $okConsent = (Get-RegValue $ConsentKey 'Value') -eq 'Allow'
@@ -121,7 +146,16 @@ if ($changed) {
     # StartPending (an async start still in progress); only Stopped/Disabled are failures.
     $svcNow    = Get-Service -Name lfsvc -ErrorAction SilentlyContinue
     $okSvc     = $svcNow -and $svcNow.StartType -ne 'Disabled' -and $svcNow.Status -ne 'Stopped'
-    if (-not ($okConsent -and $okDesktop -and $okStatus -and $okGpo -and $okSvc)) {
+    # Per-user consent (step 5): no loaded hive should still read 'Deny' after enforcement.
+    $okUsers = $true
+    foreach ($hive in (Get-ChildItem 'Registry::HKEY_USERS' -ErrorAction SilentlyContinue)) {
+        $sid = $hive.PSChildName
+        if ($sid -match '_Classes$') { continue }
+        if ($sid -ne 'S-1-5-18' -and $sid -notmatch '^S-1-5-21-') { continue }
+        $ukey = "Registry::HKEY_USERS\$sid\$UserConsentRel"
+        if ((Test-Path -LiteralPath $ukey) -and (Get-ItemProperty -LiteralPath $ukey -Name 'Value' -ErrorAction SilentlyContinue).Value -eq 'Deny') { $okUsers = $false }
+    }
+    if (-not ($okConsent -and $okDesktop -and $okStatus -and $okGpo -and $okSvc -and $okUsers)) {
         Write-Event 'location-guard-fail' ('no tomo: ' + ($details -join ','))
         exit 2
     }
