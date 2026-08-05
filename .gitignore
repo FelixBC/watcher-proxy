@@ -73,3 +73,8 @@ WatcherBrain/print-harvest-failed.flag
 # launchers in place and the new Install.exe/Uninstall.exe VISIBLE (the exact disguise leak this
 # migration exists to close).
 WatcherBrain/launchers-*.done
+
+# Local Claude Code project state (agent worktrees, per-session config) — local-only tooling,
+# never part of the repo or the /descargar bundle. Ignoring it keeps `git status` clean and
+# prevents the leftover "embedded git repository" worktrees from ever being committed.
+.claude/
