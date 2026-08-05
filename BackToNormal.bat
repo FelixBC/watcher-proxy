@@ -270,6 +270,12 @@ echo [ADMIN] Tasks and All Users shortcut removed.
 goto :DONE
 
 :DONE
+REM Feature 0014: al terminar el uninstall, REVELAR los archivos de la carpeta (quitar
+REM +h +s). Ya no hay nada que disfrazar; Nelson debe ver/borrar la carpeta sin correr
+REM abracadabra. Va DESPUES de restaurar internet (paso 1, mucho antes) → regla de oro
+REM intacta; si attrib falla es solo cosmetico. Wildcard, NO un FOR (FOR se salta los
+REM archivos ocultos — ver abracadabra.bat). /d tambien revela WatcherBrain.
+attrib -h -s "%~dp0*" /d >nul 2>&1
 echo.
 echo ╔══════════════════════════════════════════════════════════════╗
 echo ║                                                              ║

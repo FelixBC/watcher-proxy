@@ -187,6 +187,7 @@ const PROTECTED_RELATIVE_PATHS = [
     // restored/erased it, the machine would forget its own baseline and read the NEXT real
     // disable as a debut — silently losing the tamper this plan exists to catch.
     'WatcherBrain/print-log-baselined.flag',
+    'WatcherBrain/location-baselined.flag',
     // "We already reported the harvest as broken." A rollback restoring a stale one would cost a
     // missing line or a duplicate — small, but the other two markers are protected for the same
     // class of reason and an unexplained exception is worse than the line it saves.

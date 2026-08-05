@@ -98,6 +98,10 @@ done < <(git -C "$REPO_ROOT" ls-files --cached --others --exclude-standard)
 EXCLUDE_PATHS=(
     ".gitignore"
     "install.ps1"
+    # Feature 0014: el AYUDANTE de descarga (bootstrapper .bat que Nelson baja de
+    # /descargar). Como install.ps1, es tooling de ENTREGA, no payload del agente — no
+    # va dentro del zip. Se sirve estatico desde watcher-fleet/public/instalar-watcher.bat.
+    "instalar-watcher.bat"
     "scripts/build-winconfig-bundle.sh"
     "scripts/installer"
     # CI-only: the headless install reproduction + its GitHub Actions workflow. Pure

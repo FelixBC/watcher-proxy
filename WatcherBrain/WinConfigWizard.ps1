@@ -29,6 +29,11 @@ $ErrorActionPreference = 'Stop'
 $BrainDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RootDir  = Split-Path -Parent $BrainDir
 
+# Feature 0014: ¿el instalador fue lanzado por el AYUDANTE de descarga? El ayudante
+# fija WATCHER_BOOTSTRAP_PATH (su propia ruta). InstallWatcher.bat borra ese archivo de
+# Descargas en el éxito (paso 8); aquí solo avisamos en la pantalla de resultado.
+$script:fromBootstrap = -not [string]::IsNullOrWhiteSpace($env:WATCHER_BOOTSTRAP_PATH)
+
 # ---- Self-elevate (UAC), same as the console installer needs today ------------
 function Test-Elevated {
     $id = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -353,16 +358,21 @@ function On-Finished {
             # register-status.txt reason to show the RIGHT one of those instead of
             # always claiming "Conectado al panel".
             $reason = Read-RegisterReason
+            # Feature 0014: si vino del ayudante de descarga, InstallWatcher ya borro el
+            # bootstrapper de Descargas (paso 8) — avisarlo en la pantalla de exito.
+            $boot = if ($script:fromBootstrap) { @('Se limpio el archivo de descarga.') } else { @() }
             if ($reason -eq 'already_enrolled') {
-                Show-Result $true 'Listo (ya estaba registrado)' @('Configuracion aplicada, proteccion activa.', 'Este equipo ya figuraba en el panel:', 'si necesitas re-registrarlo, borralo del', 'panel primero y vuelve a instalar.') $false
+                Show-Result $true 'Listo (ya estaba registrado)' (@('Configuracion aplicada, proteccion activa.', 'Este equipo ya figuraba en el panel:', 'si necesitas re-registrarlo, borralo del', 'panel primero y vuelve a instalar.') + $boot) $false
             } elseif ($reason -eq 'bad_code') {
-                Show-Result $false 'Codigo no aceptado por el panel' @('La proteccion quedo activa en el equipo,', 'pero el panel no acepto el codigo maestro.', 'Verifica el codigo con el administrador', 'y vuelve a intentarlo.') $true
+                # Install exitoso localmente (protección activa) aunque el panel rechazó el
+                # código → InstallWatcher ya borró el ayudante; avisarlo aquí también (Codex/revisor).
+                Show-Result $false 'Codigo no aceptado por el panel' (@('La proteccion quedo activa en el equipo,', 'pero el panel no acepto el codigo maestro.', 'Verifica el codigo con el administrador', 'y vuelve a intentarlo.') + $boot) $true
             } elseif ($reason -eq 'rate_limited') {
-                Show-Result $true 'Listo (panel ocupado)' @('Configuracion aplicada, proteccion activa.', 'El panel rechazo la conexion por demasiados', 'intentos recientes: probalo de nuevo mas tarde.') $false
+                Show-Result $true 'Listo (panel ocupado)' (@('Configuracion aplicada, proteccion activa.', 'El panel rechazo la conexion por demasiados', 'intentos recientes: probalo de nuevo mas tarde.') + $boot) $false
             } elseif ($reason -and $reason -ne 'ok') {
-                Show-Result $true 'Listo (sin conexion al panel)' @('Configuracion aplicada, proteccion activa.', 'No se pudo conectar con el panel ahora;', 'no reintenta solo - vuelve a instalar mas', 'tarde para conectarlo.') $false
+                Show-Result $true 'Listo (sin conexion al panel)' (@('Configuracion aplicada, proteccion activa.', 'No se pudo conectar con el panel ahora;', 'no reintenta solo - vuelve a instalar mas', 'tarde para conectarlo.') + $boot) $false
             } else {
-                Show-Result $true 'Todo listo' @('Configuracion aplicada', 'Conectado al panel', 'Proteccion activa') $false
+                Show-Result $true 'Todo listo' (@('Configuracion aplicada', 'Conectado al panel', 'Proteccion activa') + $boot) $false
             }
         } else {
             $hint = Get-LastErrorHint $out
@@ -433,6 +443,9 @@ function Start-Action {
 
     if ($Mode -eq 'Install') {
         $psi.EnvironmentVariables['WATCHER_MASTER_CODE'] = $master
+        # Feature 0014: reenviar la ruta del ayudante al hijo (se hereda por defecto, pero
+        # lo hacemos explícito) para que InstallWatcher.bat borre el bootstrapper en el paso 8.
+        if ($script:fromBootstrap) { $psi.EnvironmentVariables['WATCHER_BOOTSTRAP_PATH'] = $env:WATCHER_BOOTSTRAP_PATH }
         if ($script:tbName -and $script:tbName.Text.Trim().Length -gt 0) { $psi.EnvironmentVariables['WATCHER_MACHINE_NAME'] = $script:tbName.Text.Trim() }
         if ($script:tbZone -and $script:tbZone.Text.Trim().Length -gt 0) { $psi.EnvironmentVariables['WATCHER_MACHINE_ZONE'] = $script:tbZone.Text.Trim() }
         if ($script:tbCode -and $script:tbCode.Text.Trim().Length -gt 0) { $psi.EnvironmentVariables['WATCHER_MACHINE_CODE'] = $script:tbCode.Text.Trim() }
