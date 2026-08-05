@@ -53,6 +53,7 @@ const EVENTS_LOG_PATH = path.join(BRAIN_DIR, 'events.log');
 // marker whose mtime is the "when did we last do it" clock (no content is ever read).
 const HARDEN_PRINTERS_PS = path.join(BRAIN_DIR, 'HardenPrinters.ps1');
 const HARDEN_POWER_PS = path.join(BRAIN_DIR, 'HardenPower.ps1');
+const HARDEN_LOCATION_PS = path.join(BRAIN_DIR, 'HardenLocation.ps1');
 const HARDEN_MARKER_PATH = path.join(BRAIN_DIR, 'harden-last.txt');
 // Plan 0011: SEPARATE from the throttle clock above. harden-last.txt is stamped BEFORE running
 // (the ~hourly "when did we last try" throttle); this confirm marker is stamped ONLY when the
@@ -416,7 +417,7 @@ function reassertHardeningIfDue() {
         // Run BOTH guards (they re-force their settings regardless of the stamp), tracking whether
         // EVERY first-class guard actually ran and returned exactly 0 (verified-clean).
         let allVerifiedClean = true;
-        for (const script of [HARDEN_PRINTERS_PS, HARDEN_POWER_PS]) {
+        for (const script of [HARDEN_PRINTERS_PS, HARDEN_POWER_PS, HARDEN_LOCATION_PS]) {
             let status = null;
             try {
                 if (fs.existsSync(script)) {

