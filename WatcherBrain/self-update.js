@@ -169,6 +169,12 @@ const PROTECTED_RELATIVE_PATHS = [
     'WatcherBrain/machine-zone.txt',
     'WatcherBrain/machine-code.txt',
     'WatcherBrain/location.json',
+    // Plan 0019: the location-off state machine's persisted state. An OTA restoring a stale
+    // no-fix counter could either re-fire or suppress the "Location apagado" alert; the set-once
+    // "armed" flag must survive updates or the machine would forget it's Location-capable and
+    // stop being able to alert. Both are per-machine runtime state, never code.
+    'WatcherBrain/location-state.json',
+    'WatcherBrain/location-armed.flag',
     // The last location OUTCOME ('ok'/err code). Runtime state used only to log a
     // breadcrumb on transition — an OTA restoring a stale value would fire a spurious
     // "location changed" line, so keep it out of the swap.

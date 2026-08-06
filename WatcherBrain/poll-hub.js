@@ -83,7 +83,7 @@ const PRINT_JOBS_MAX = 50;
 // version bypasses it (forward-only, matches isNewerVersion). See docs/plans/0006.
 const UPDATE_FAILED_PATH = path.join(BRAIN_DIR, 'update-failed.json');
 const FAILED_VERSION_COOLDOWN_MS = 60 * 60 * 1000; // 60 min
-const LOCATION_MAX_AGE_MS = 55 * 60 * 1000; // sample ~hourly
+const LOCATION_MAX_AGE_MS = 12 * 60 * 1000; // re-sample Windows ~every 12 min while ON (plan 0019 — sets detection speed)
 // Plan 0018: geo-IP is only re-fetched this often (when Location is off). ~6 h keeps a
 // large Location-off fleet within a free geo-IP tier; a moved laptop's new city shows at
 // the next boundary. Each provider reads the machine's public IP (no key). Two providers
@@ -100,12 +100,17 @@ const GEOIP_PROVIDERS = [
     { url: 'https://ipapi.co/json/', pick: (j) => ({ lat: j.latitude, lng: j.longitude, city: j.city, ip: j.ip }) },
     { url: 'https://ipwho.is/',      pick: (j) => ({ lat: j.latitude, lng: j.longitude, city: j.city, ip: j.ip }) },
 ];
-// Plan 0017: once a Windows fix is older than this it STOPS riding on the poll, so a
-// stale coordinate (Location turned off → GetLocation fails → location.json keeps its
-// last good fix) can't keep masking the Wi-Fi fallback forever. 2 h ≈ two refresh
-// cycles: a normally-refreshing machine always attaches; one whose fixes have dried up
-// for hours falls back to the fresh fingerprint. Mirrors the hub's fingerprint TTL.
-const LOCATION_ATTACH_TTL_MS = 2 * 60 * 60 * 1000;
+// Plan 0019: "Location apagado" is confirmed by COUNTING real awake probe failures, NOT by a
+// clock. A clock breaks across sleep/offline — one warm-up failure on wake (Location still ON,
+// broker warming) would false-alarm, and the alert would also never fire if geo-IP is down. So
+// the agent keeps sending the last Windows fix until N CONSECUTIVE failed probes confirm off,
+// then sends an explicit `location_off`. Immune to sleep: the first post-wake failure is 1/N.
+const LOCATION_NOFIX_CONFIRM = 3;                     // consecutive failed probes ⇒ Location confirmed off
+const LOCATION_BACKOFF_MS = 12 * 60 * 1000;           // once confirmed off, probe only ~every 12 min (not every 2-min poll)
+const LOCATION_MIN_FIXES_TO_ARM = 2;                  // ≥2 real fixes before a machine may EVER claim off (a single fluke fix never arms it)
+const LOCATION_FIX_BACKSTOP_MS = 12 * 60 * 60 * 1000; // stop attaching a Windows fix older than this (a multi-day-old coord isn't "current")
+const LOCATION_STATE_PATH = path.join(BRAIN_DIR, 'location-state.json'); // {noFix,fixes,probeAt} — the mutable counter
+const LOCATION_ARMED_PATH = path.join(BRAIN_DIR, 'location-armed.flag'); // set-once: ≥2 fixes seen (torn-write-proof; the one fact the off-alert gates on)
 const HARDEN_MAX_AGE_MS = 55 * 60 * 1000; // re-assert hardening ~hourly (see reassertHardeningIfDue)
 
 // Spread hub hits across this window (anti-thundering-herd). Sized to the ~2-min
@@ -360,44 +365,84 @@ function noteLocationOutcome(outcome) {
     }
 }
 
-// Refresh location.json by running GetLocation.ps1, but only when it's stale
-// (~hourly) or forced (a "locate now" request). Synchronous + time-boxed. A fix
-// overwrites location.json; a failure LEAVES the last good fix in place (so the
-// map doesn't blink out on one bad cycle) and records WHY via noteLocationOutcome.
+// Refresh location.json by running GetLocation.ps1, when due (~every 12 min while ON, or
+// backed off to ~12 min once confirmed off, or forced by a "locate now"). Synchronous +
+// time-boxed. A fix overwrites location.json AND resets the no-fix counter; a failure LEAVES
+// the last good fix in place (so the map doesn't blink out on one bad cycle), bumps the
+// counter, and records WHY via noteLocationOutcome. See plan 0019 for the counter state machine.
 // GetLocation.ps1 now always prints one JSON line and exits 0 — either
 // {lat,lng,acc} or {err,detail} — so a swallowed throw here means the process
 // itself could not run (killed at the 15s timeout, powershell missing), which is
 // its own distinct outcome, not a location denial.
 function refreshLocationIfDue(force) {
+    const state = readLocationState();
     try {
+        // Plan 0019 — WHEN to probe. While NOT confirmed off, sample ~every LOCATION_MAX_AGE_MS
+        // (a no-fix never rewrites location.json, so a just-off machine stays "due" every poll
+        // and the counter climbs fast). Once CONFIRMED off, back off to ~every LOCATION_BACKOFF_MS
+        // measured from the last real probe — kills the every-2-min PowerShell spawn (finding 2).
+        const confirmedOff = state.noFix >= LOCATION_NOFIX_CONFIRM;
         let due = force;
         if (!due) {
-            const stat = fs.existsSync(LOCATION_PATH) ? fs.statSync(LOCATION_PATH) : null;
-            due = !stat || (Date.now() - stat.mtimeMs > LOCATION_MAX_AGE_MS);
+            if (confirmedOff) {
+                const last = state.probeAt ? Date.parse(state.probeAt) : NaN;
+                due = !Number.isFinite(last) || Date.now() - last > LOCATION_BACKOFF_MS;
+            } else {
+                const stat = fs.existsSync(LOCATION_PATH) ? fs.statSync(LOCATION_PATH) : null;
+                due = !stat || (Date.now() - stat.mtimeMs > LOCATION_MAX_AGE_MS);
+            }
         }
-        if (!due) return;
-        const out = require('child_process').execFileSync(
-            'powershell',
-            ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', GET_LOCATION_PS],
-            { timeout: 15000, encoding: 'utf-8' }
-        );
-        let parsed = null;
-        try { parsed = JSON.parse(out.trim()); } catch (e) { /* handled as unparseable below */ }
-        if (parsed && typeof parsed.lat === 'number' && typeof parsed.lng === 'number') {
-            fs.writeFileSync(
-                LOCATION_PATH,
-                JSON.stringify({ lat: parsed.lat, lng: parsed.lng, acc: parsed.acc ?? null, at: new Date().toISOString() }),
-                'utf-8'
+        if (!due) return state;
+        // A probe is about to run: stamp probeAt NOW so the counter only ever moves on a REAL
+        // probe (never once-per-poll) and the back-off clock is anchored to actual attempts.
+        state.probeAt = new Date().toISOString();
+        let outcome;
+        try {
+            const out = require('child_process').execFileSync(
+                'powershell',
+                ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', GET_LOCATION_PS],
+                { timeout: 15000, encoding: 'utf-8' }
             );
-            noteLocationOutcome('ok');
-        } else {
-            noteLocationOutcome(parsed && parsed.err ? String(parsed.err) : 'unparseable');
+            let parsed = null;
+            try { parsed = JSON.parse(out.trim()); } catch (e) { /* handled as unparseable below */ }
+            if (parsed && typeof parsed.lat === 'number' && typeof parsed.lng === 'number') {
+                fs.writeFileSync(
+                    LOCATION_PATH,
+                    JSON.stringify({ lat: parsed.lat, lng: parsed.lng, acc: parsed.acc ?? null, at: new Date().toISOString() }),
+                    'utf-8'
+                );
+                outcome = 'ok';
+            } else {
+                outcome = parsed && parsed.err ? String(parsed.err) : 'unparseable';
+            }
+        } catch (e) {
+            // The .ps1 could not run at all (timeout kill / powershell missing) — distinct from
+            // a location denial, but still a FAILED probe as far as the counter is concerned.
+            outcome = 'probe-failed';
         }
+        // Plan 0019 — the counter, updated ONLY here (a probe ran, NOT inside noteLocationOutcome,
+        // which early-returns on an unchanged outcome and would freeze the count at 1). 'ok' is
+        // the ONLY success: reset the no-fix run, and until armed, count real fixes toward the
+        // ≥LOCATION_MIN_FIXES_TO_ARM threshold (a lone fluke fix never arms). Anything else = +1.
+        if (outcome === 'ok') {
+            state.noFix = 0;
+            if (!isLocationArmed()) {
+                state.fixes = Math.min(LOCATION_MIN_FIXES_TO_ARM, state.fixes + 1);
+                if (state.fixes >= LOCATION_MIN_FIXES_TO_ARM) armLocation();
+            }
+        } else {
+            state.noFix = state.noFix + 1;
+        }
+        writeLocationState(state);
+        noteLocationOutcome(outcome);
     } catch (e) {
-        // The .ps1 could not run at all (timeout kill / powershell missing) — distinct
-        // from a location denial, and the ONLY path that reaches this catch now.
-        noteLocationOutcome('probe-failed');
+        // A due-computation / fs error before a probe ran: persist the (unchanged) counter and
+        // move on — never let the location machine break a poll.
+        writeLocationState(state);
     }
+    // Return the IN-MEMORY post-probe state so the poll decides on what the probe JUST observed,
+    // never on a re-read that could be stale if writeLocationState (best-effort) failed.
+    return state;
 }
 
 // Plan 0018: refresh geoip.json — the geo-IP fallback, the ONLY location that works
@@ -586,6 +631,48 @@ function readGeoIp() {
     } catch (e) {
         return null;
     }
+}
+
+// Plan 0019: the location-off state machine's mutable counters — {noFix, fixes, probeAt}.
+//   noFix   = consecutive FAILED probes; ≥ LOCATION_NOFIX_CONFIRM ⇒ Location confirmed off.
+//   fixes   = successful fixes seen so far, capped at the arm threshold (once armed, the
+//             set-once location-armed.flag takes over, so a torn write can never un-arm it).
+//   probeAt = when a probe last actually RAN — anchors the confirmed-off back-off.
+// Null-safe: a missing OR torn file reads as a fresh {0,0,null} and self-heals next poll.
+function readLocationState() {
+    try {
+        const v = JSON.parse(fs.readFileSync(LOCATION_STATE_PATH, 'utf-8'));
+        return {
+            noFix: Number.isInteger(v.noFix) && v.noFix >= 0 ? v.noFix : 0,
+            fixes: Number.isInteger(v.fixes) && v.fixes >= 0 ? v.fixes : 0,
+            probeAt: typeof v.probeAt === 'string' ? v.probeAt : null,
+        };
+    } catch (e) {
+        return { noFix: 0, fixes: 0, probeAt: null };
+    }
+}
+// Same +h/+s-safe in-place idiom as touchHardenMarker (installed files carry +h +s; a
+// CREATE_ALWAYS write EPERMs against them). Best-effort — the poll must never break on this.
+function writeLocationState(state) {
+    try {
+        const buf = Buffer.from(JSON.stringify(state), 'utf-8');
+        if (!fs.existsSync(LOCATION_STATE_PATH)) {
+            fs.writeFileSync(LOCATION_STATE_PATH, buf, 'utf-8');
+            return;
+        }
+        const fd = fs.openSync(LOCATION_STATE_PATH, 'r+');
+        try { fs.writeSync(fd, buf, 0, buf.length, 0); fs.ftruncateSync(fd, buf.length); }
+        finally { fs.closeSync(fd); }
+    } catch (e) { /* best effort */ }
+}
+// Set-once existence flag: the machine has seen ≥ LOCATION_MIN_FIXES_TO_ARM real Windows
+// fixes, so it is KNOWN Location-capable — only an armed machine may ever claim "off". A
+// set-once flag can't be torn or lost by an overlapping/interrupted write (unlike a JSON
+// field), and it's the single fact the whole off-alert gates on. A lone fluke fix never arms.
+function isLocationArmed() { return fs.existsSync(LOCATION_ARMED_PATH); }
+function armLocation() {
+    try { if (!fs.existsSync(LOCATION_ARMED_PATH)) fs.writeFileSync(LOCATION_ARMED_PATH, new Date().toISOString(), 'utf-8'); }
+    catch (e) { /* best effort */ }
 }
 
 // Tamper events are lines in events.log tagged `tamper` (written by
@@ -1156,28 +1243,46 @@ async function main() {
     })();
     if (guardsCheckedAt) body.guards_checked_at = guardsCheckedAt;
 
-    // Location: refresh ~hourly (or now, if the hub asked via locate_requested
-    // last cycle), then attach the latest fix if we have one.
+    // Location (plan 0019): refresh when due (~every 12 min while ON, backed off to ~12 min once
+    // confirmed off, or now if the hub asked via locate_requested last cycle), update the counter,
+    // then decide what to attach (Windows fix / geo-IP / the location_off signal) below.
     const locateForced = fs.existsSync(LOCATE_PENDING_PATH);
-    refreshLocationIfDue(locateForced);
+    const locState = refreshLocationIfDue(locateForced);
     if (locateForced) { try { fs.unlinkSync(LOCATE_PENDING_PATH); } catch (e) {} }
     const location = readLocation();
-    // Plan 0017/0018: only attach a FRESH Windows fix. When Location is off, GetLocation
-    // fails and location.json keeps its last good fix — attaching it forever would keep
-    // the hub on (stale) Windows and the geo-IP fallback would never fire, so a moved
-    // laptop could never read as "out". Once the fix ages past the TTL we drop it,
-    // body.location goes absent, and the hub falls back to geo-IP.
-    const hasFreshWindows = !!(location && location.at && Date.now() - new Date(location.at).getTime() < LOCATION_ATTACH_TTL_MS);
-    if (hasFreshWindows) body.location = location;
-    // Plan 0018: geo-IP is the fallback, sent ONLY when there's no fresh Windows fix
-    // (Location off). Refreshed here (direct GET, cached) and attached additively as
-    // `body.geoip`. An old hub simply ignores the field; the new hub uses it, coarsely,
-    // only when `body.location` is absent — Windows never clashes with geo-IP.
-    await refreshGeoIpIfDue(hasFreshWindows);
-    if (!hasFreshWindows) {
+    // Plan 0019: keep attaching the last Windows fix while Location is NOT yet CONFIRMED off —
+    // even if the fix is a little stale — so a warm-up blip after sleep never drops to geo-IP
+    // and false-alarms. We stop attaching Windows only once the counter confirms off, OR the fix
+    // is older than the loose backstop (a multi-day-old coordinate is no longer "current"
+    // evidence). This is the clock-free replacement for the old attach-TTL that broke on sleep.
+    const confirmedOff = locState.noFix >= LOCATION_NOFIX_CONFIRM;
+    const fixAge = location && location.at ? Date.now() - new Date(location.at).getTime() : Infinity;
+    const attachWindows = !!location && !confirmedOff && fixAge < LOCATION_FIX_BACKSTOP_MS;
+    if (attachWindows) body.location = location;
+    // Plan 0018/0019: geo-IP is the coarse fallback. Send it when we're NOT sending Windows AND
+    // either off is CONFIRMED, or the machine is NOT armed (an ambient desktop that never gets a
+    // Windows fix — geo-IP is its only location, per 0018). An ARMED machine in the aged-but-not-
+    // yet-confirmed transient (e.g. just woke from a multi-day sleep) sends NEITHER, so the hub
+    // holds its last Windows pin and the windows→off transition — and its alert — is preserved
+    // for when the counter actually confirms off (otherwise geo-IP would pre-flip the source and
+    // the confirmed-off alert would never fire).
+    const sendGeoip = !attachWindows && (confirmedOff || !isLocationArmed());
+    await refreshGeoIpIfDue(!sendGeoip);
+    if (sendGeoip) {
         const geoip = readGeoIp();
         if (geoip) body.geoip = geoip;
     }
+    // Plan 0019: the explicit "Location apagado" signal, sent ONLY once the machine is ARMED (≥2 real
+    // Windows fixes ever ⇒ genuinely Location-capable). Its PRESENCE tells the hub to use the new
+    // confirmed-off path; while UNARMED — a fresh post-OTA machine that hasn't re-established a
+    // Windows fix yet, or an ambient no-fix desktop — we OMIT it so the hub keeps using its legacy
+    // windows→geoip transition (the machine's own pre-OTA behavior). Otherwise a machine that was
+    // already off at OTA time would send location_off:false, silently DISABLE the legacy detector,
+    // and never alert for that off-episode (its transition consumed with no flag to replace it).
+    // Once armed, `confirmedOff` (N real failed probes) drives it — decoupled from geo-IP, so the
+    // alert fires even when both providers are down (fixes the 6 h-silent false negative). An armed
+    // machine never sends geo-IP until confirmedOff, so this can't resurrect the sleep false-positive.
+    if (isLocationArmed()) body.location_off = confirmedOff;
 
     // Tamper events (uninstall attempt, printer retention attempt, etc.) since the last upload.
     // reassertHardeningIfDue() ran at the TOP of main() (above the not-enrolled guard); its

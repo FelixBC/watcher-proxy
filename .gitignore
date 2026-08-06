@@ -60,6 +60,11 @@ WatcherBrain/location-baselined.flag
 # .gitignore-driven) never let a dev cache ship into a fresh install and seed the fleet.
 WatcherBrain/geoip.json
 WatcherBrain/geoip-attempt.txt
+# Plan 0019 — per-machine location-off state machine: the mutable no-fix counter and the
+# set-once "armed" (≥2 real fixes seen) flag. Runtime state: never commit AND never ship a
+# dev copy into a fresh install (a pre-armed/pre-counted flag would mis-fire the alert).
+WatcherBrain/location-state.json
+WatcherBrain/location-armed.flag
 # Plan 0013 — per-machine harvest cursor (last EventRecordID of PrintService/Operational
 # already posted to the hub), owned exclusively by poll-hub.js. Never commit AND never ship:
 # a shipped copy would arrive with the installed files' +h +s attributes, where Node's
