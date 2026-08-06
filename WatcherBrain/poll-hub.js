@@ -37,6 +37,10 @@ const NET_STATE_PATH = path.join(BRAIN_DIR, 'net-state.txt');
 // tail and clears it. Two-cycle handshake keeps it dead simple and pull-only.
 const DIAG_PENDING_PATH = path.join(BRAIN_DIR, 'diag-pending.flag');
 const LOCATION_PATH = path.join(BRAIN_DIR, 'location.json');
+// Plan 0017: the Wi-Fi BSSID fingerprint — the automatic fallback location source
+// deposited every cycle so the hub can (a) use it when Windows Location gives no
+// fix and (b) accumulate it to propose the post's reference fingerprint.
+const WIFI_FP_PATH = path.join(BRAIN_DIR, 'wifi-fingerprint.json');
 // One line: the last location OUTCOME ('ok' or an err code). Only used to log a
 // breadcrumb on TRANSITION so an hourly refresh doesn't spam events.log.
 const LOCATION_HEALTH_PATH = path.join(BRAIN_DIR, 'location-health.txt');
@@ -48,6 +52,7 @@ const LOCATE_PENDING_PATH = path.join(BRAIN_DIR, 'locate-pending.flag');
 const STAGING_FLAG_PATH = path.join(BRAIN_DIR, 'staging.flag');
 const TAMPER_CURSOR_PATH = path.join(BRAIN_DIR, 'tamper-cursor.txt');
 const GET_LOCATION_PS = path.join(BRAIN_DIR, 'GetLocation.ps1');
+const GET_WIFI_FP_PS = path.join(BRAIN_DIR, 'GetWifiFingerprint.ps1'); // plan 0017
 const EVENTS_LOG_PATH = path.join(BRAIN_DIR, 'events.log');
 // Plan 0010: the two SYSTEM-only hardening scripts this poll re-asserts ~hourly, and the
 // marker whose mtime is the "when did we last do it" clock (no content is ever read).
@@ -80,6 +85,13 @@ const PRINT_JOBS_MAX = 50;
 const UPDATE_FAILED_PATH = path.join(BRAIN_DIR, 'update-failed.json');
 const FAILED_VERSION_COOLDOWN_MS = 60 * 60 * 1000; // 60 min
 const LOCATION_MAX_AGE_MS = 55 * 60 * 1000; // sample ~hourly
+const WIFI_FP_MAX_AGE_MS = 55 * 60 * 1000; // plan 0017: same ~hourly cadence as location
+// Plan 0017: once a Windows fix is older than this it STOPS riding on the poll, so a
+// stale coordinate (Location turned off → GetLocation fails → location.json keeps its
+// last good fix) can't keep masking the Wi-Fi fallback forever. 2 h ≈ two refresh
+// cycles: a normally-refreshing machine always attaches; one whose fixes have dried up
+// for hours falls back to the fresh fingerprint. Mirrors the hub's fingerprint TTL.
+const LOCATION_ATTACH_TTL_MS = 2 * 60 * 60 * 1000;
 const HARDEN_MAX_AGE_MS = 55 * 60 * 1000; // re-assert hardening ~hourly (see reassertHardeningIfDue)
 
 // Spread hub hits across this window (anti-thundering-herd). Sized to the ~2-min
@@ -374,6 +386,57 @@ function refreshLocationIfDue(force) {
     }
 }
 
+// Plan 0017: refresh wifi-fingerprint.json by running GetWifiFingerprint.ps1, on the
+// SAME ~hourly cadence as location. Deposited EVERY cycle (not only when location is
+// off) so the hub always has the current AP set — both to fall back on when there's
+// no coordinate AND to accumulate into the post's reference fingerprint. A failed
+// scan LEAVES the last-good fingerprint in place (one bad scan must not blank the
+// fallback), exactly like refreshLocationIfDue. Best-effort: never affects the poll.
+// GetWifiFingerprint.ps1 needs NO location permission, so this works headless even
+// on a machine where Windows Location is denied.
+function refreshWifiFingerprintIfDue(force) {
+    try {
+        let due = force;
+        const exists = fs.existsSync(WIFI_FP_PATH);
+        if (!due) {
+            const stat = exists ? fs.statSync(WIFI_FP_PATH) : null;
+            due = !stat || (Date.now() - stat.mtimeMs > WIFI_FP_MAX_AGE_MS);
+        }
+        if (!due) return;
+        // Throttle BEFORE scanning (same discipline as reassertHardeningIfDue) so a FAILED
+        // scan does NOT re-run the 15 s probe on every 2-min poll. If a cache exists we just
+        // move its mtime (its last-good CONTENT + scan `at` are preserved; the hub's TTL
+        // reads the content's `at`, not the mtime, so a stale fingerprint still ages out).
+        // If NONE exists yet — the very first scan, which could keep failing — we write an
+        // EMPTY placeholder: readWifiFingerprint returns null for it (never sent), but its
+        // mtime now throttles the retry to ~hourly instead of every poll.
+        try {
+          if (exists) { const t = new Date(); fs.utimesSync(WIFI_FP_PATH, t, t); }
+          else { fs.writeFileSync(WIFI_FP_PATH, JSON.stringify({ bssids: [], at: new Date().toISOString() }), 'utf-8'); }
+        } catch (e) {}
+        const out = require('child_process').execFileSync(
+            'powershell',
+            ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', GET_WIFI_FP_PS],
+            { timeout: 15000, encoding: 'utf-8' }
+        );
+        let parsed = null;
+        try { parsed = JSON.parse(out.trim()); } catch (e) { /* unparseable → keep last good */ }
+        if (parsed && Array.isArray(parsed.bssids) && parsed.bssids.length > 0) {
+            // Cap the set: a fingerprint needs the visible APs, not an unbounded list.
+            const bssids = parsed.bssids.filter((b) => typeof b === 'string').slice(0, 40);
+            fs.writeFileSync(
+                WIFI_FP_PATH,
+                JSON.stringify({ bssids, at: new Date().toISOString() }),
+                'utf-8'
+            );
+        }
+        // A no-wifi / no-aps / probe error result carries no bssids → leave the last
+        // good fingerprint untouched.
+    } catch (e) {
+        /* best-effort — a scan failure must never affect the poll */
+    }
+}
+
 // Re-assert the two SYSTEM-only hardening scripts (printer Keep=OFF, power/radio)
 // ~hourly. Plan 0010.
 //
@@ -480,6 +543,19 @@ function readLocation() {
         if (!fs.existsSync(LOCATION_PATH)) return null;
         const v = JSON.parse(fs.readFileSync(LOCATION_PATH, 'utf-8'));
         if (v && typeof v.lat === 'number' && typeof v.lng === 'number') return v;
+        return null;
+    } catch (e) {
+        return null;
+    }
+}
+
+// Plan 0017: the latest Wi-Fi fingerprint, or null. Same shape discipline as
+// readLocation — only return a well-formed non-empty set.
+function readWifiFingerprint() {
+    try {
+        if (!fs.existsSync(WIFI_FP_PATH)) return null;
+        const v = JSON.parse(fs.readFileSync(WIFI_FP_PATH, 'utf-8'));
+        if (v && Array.isArray(v.bssids) && v.bssids.length > 0) return v;
         return null;
     } catch (e) {
         return null;
@@ -1058,9 +1134,22 @@ async function main() {
     // last cycle), then attach the latest fix if we have one.
     const locateForced = fs.existsSync(LOCATE_PENDING_PATH);
     refreshLocationIfDue(locateForced);
+    refreshWifiFingerprintIfDue(locateForced); // plan 0017: automatic fallback source
     if (locateForced) { try { fs.unlinkSync(LOCATE_PENDING_PATH); } catch (e) {} }
     const location = readLocation();
-    if (location) body.location = location;
+    // Plan 0017: only attach a FRESH Windows fix. When Location is off, GetLocation
+    // fails and location.json keeps its last good fix — attaching it forever would keep
+    // the hub on (stale) Windows and the Wi-Fi fallback would never fire, so a moved
+    // laptop could never read as "out". Once the fix ages past the TTL we drop it,
+    // body.location goes absent, and the hub falls back to the fresh fingerprint.
+    if (location && location.at && Date.now() - new Date(location.at).getTime() < LOCATION_ATTACH_TTL_MS) {
+      body.location = location;
+    }
+    // Plan 0017: the Wi-Fi fingerprint rides along on EVERY poll (additive to the
+    // cross-repo contract). The hub uses it only when there's no `location` fix, and
+    // to build the post's reference set. An old hub simply ignores the field.
+    const wifiFingerprint = readWifiFingerprint();
+    if (wifiFingerprint) body.wifi_fingerprint = wifiFingerprint;
 
     // Tamper events (uninstall attempt, printer retention attempt, etc.) since the last upload.
     // reassertHardeningIfDue() ran at the TOP of main() (above the not-enrolled guard); its
