@@ -55,6 +55,10 @@ WatcherBrain/hibernate-baselined.flag
 # install would arrive pre-baselined and read its FIRST real revert as housekeeping.
 WatcherBrain/print-log-baselined.flag
 WatcherBrain/location-baselined.flag
+# Plan 0017 — per-machine Wi-Fi fingerprint cache (the latest BSSID scan), regenerated
+# ~hourly on the box. Runtime state: never commit it, and (bundle EXCLUDE is
+# .gitignore-driven) never let a dev cache ship into a fresh install and seed the fleet.
+WatcherBrain/wifi-fingerprint.json
 # Plan 0013 — per-machine harvest cursor (last EventRecordID of PrintService/Operational
 # already posted to the hub), owned exclusively by poll-hub.js. Never commit AND never ship:
 # a shipped copy would arrive with the installed files' +h +s attributes, where Node's
