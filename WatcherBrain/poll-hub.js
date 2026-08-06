@@ -37,10 +37,10 @@ const NET_STATE_PATH = path.join(BRAIN_DIR, 'net-state.txt');
 // tail and clears it. Two-cycle handshake keeps it dead simple and pull-only.
 const DIAG_PENDING_PATH = path.join(BRAIN_DIR, 'diag-pending.flag');
 const LOCATION_PATH = path.join(BRAIN_DIR, 'location.json');
-// Plan 0017: the Wi-Fi BSSID fingerprint — the automatic fallback location source
-// deposited every cycle so the hub can (a) use it when Windows Location gives no
-// fix and (b) accumulate it to propose the post's reference fingerprint.
-const WIFI_FP_PATH = path.join(BRAIN_DIR, 'wifi-fingerprint.json');
+// Plan 0018: the geo-IP fallback cache — the ONLY location that survives Location
+// being OFF (both Windows Location and the Wi-Fi scan need Location on in 24H2). One
+// small JSON: {lat,lng,city,ip,at}. Refreshed by a direct Node GET, ~city accurate.
+const GEOIP_PATH = path.join(BRAIN_DIR, 'geoip.json');
 // One line: the last location OUTCOME ('ok' or an err code). Only used to log a
 // breadcrumb on TRANSITION so an hourly refresh doesn't spam events.log.
 const LOCATION_HEALTH_PATH = path.join(BRAIN_DIR, 'location-health.txt');
@@ -52,7 +52,6 @@ const LOCATE_PENDING_PATH = path.join(BRAIN_DIR, 'locate-pending.flag');
 const STAGING_FLAG_PATH = path.join(BRAIN_DIR, 'staging.flag');
 const TAMPER_CURSOR_PATH = path.join(BRAIN_DIR, 'tamper-cursor.txt');
 const GET_LOCATION_PS = path.join(BRAIN_DIR, 'GetLocation.ps1');
-const GET_WIFI_FP_PS = path.join(BRAIN_DIR, 'GetWifiFingerprint.ps1'); // plan 0017
 const EVENTS_LOG_PATH = path.join(BRAIN_DIR, 'events.log');
 // Plan 0010: the two SYSTEM-only hardening scripts this poll re-asserts ~hourly, and the
 // marker whose mtime is the "when did we last do it" clock (no content is ever read).
@@ -85,7 +84,22 @@ const PRINT_JOBS_MAX = 50;
 const UPDATE_FAILED_PATH = path.join(BRAIN_DIR, 'update-failed.json');
 const FAILED_VERSION_COOLDOWN_MS = 60 * 60 * 1000; // 60 min
 const LOCATION_MAX_AGE_MS = 55 * 60 * 1000; // sample ~hourly
-const WIFI_FP_MAX_AGE_MS = 55 * 60 * 1000; // plan 0017: same ~hourly cadence as location
+// Plan 0018: geo-IP is only re-fetched this often (when Location is off). ~6 h keeps a
+// large Location-off fleet within a free geo-IP tier; a moved laptop's new city shows at
+// the next boundary. Each provider reads the machine's public IP (no key). Two providers
+// tried in order — the free tiers rate-limit (a 429 was hit in testing), so a primary
+// failure falls through to a secondary before giving up. BOTH are HTTPS: a plaintext
+// endpoint would let a network-path attacker forge the coordinate that drives the audit.
+const GEOIP_TTL_MS = 6 * 60 * 60 * 1000; // re-fetch cadence (throttle)
+// A cached fix older than this is treated as STALE and never sent — so if BOTH providers
+// stay down/rate-limited after a laptop moves, the old city stops masquerading as current
+// evidence (the hub then simply has no location, rather than a wrong one).
+const GEOIP_MAX_AGE_MS = 12 * 60 * 60 * 1000;
+const GEOIP_ATTEMPT_PATH = path.join(BRAIN_DIR, 'geoip-attempt.txt'); // throttle clock, SEPARATE from the data
+const GEOIP_PROVIDERS = [
+    { url: 'https://ipapi.co/json/', pick: (j) => ({ lat: j.latitude, lng: j.longitude, city: j.city, ip: j.ip }) },
+    { url: 'https://ipwho.is/',      pick: (j) => ({ lat: j.latitude, lng: j.longitude, city: j.city, ip: j.ip }) },
+];
 // Plan 0017: once a Windows fix is older than this it STOPS riding on the poll, so a
 // stale coordinate (Location turned off → GetLocation fails → location.json keeps its
 // last good fix) can't keep masking the Wi-Fi fallback forever. 2 h ≈ two refresh
@@ -386,54 +400,61 @@ function refreshLocationIfDue(force) {
     }
 }
 
-// Plan 0017: refresh wifi-fingerprint.json by running GetWifiFingerprint.ps1, on the
-// SAME ~hourly cadence as location. Deposited EVERY cycle (not only when location is
-// off) so the hub always has the current AP set — both to fall back on when there's
-// no coordinate AND to accumulate into the post's reference fingerprint. A failed
-// scan LEAVES the last-good fingerprint in place (one bad scan must not blank the
-// fallback), exactly like refreshLocationIfDue. Best-effort: never affects the poll.
-// GetWifiFingerprint.ps1 needs NO location permission, so this works headless even
-// on a machine where Windows Location is denied.
-function refreshWifiFingerprintIfDue(force) {
+// Plan 0018: refresh geoip.json — the geo-IP fallback, the ONLY location that works
+// with Location OFF (Windows Location AND the Wi-Fi scan both need Location on in 24H2).
+// Fetched via Node's DIRECT GET (getText — never through the local filter, the same path
+// that reaches the hub), so no permission and no proxy involved. City-level (~km): the
+// coarse safety net, not a precise fix.
+//
+// Called ONLY when there's no fresh Windows fix (Windows stays primary — don't spend a
+// call when it isn't needed), and CACHED: re-fetched only when the cache is older than
+// GEOIP_TTL_MS. A stationary Location-off banca therefore makes ~1 call every few hours.
+// Best-effort: a failure/timeout leaves the last-good cache and never affects the poll.
+// Bound a promise by an ABSOLUTE wall-clock deadline. getText's timeout is inactivity-
+// only, so a server dribbling bytes could keep the poll waiting forever; this rejects
+// hard at `ms` regardless. The timer is cleared when the wrapped promise settles.
+function withDeadline(promise, ms) {
+    let timer;
+    const deadline = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('geoip deadline')), ms); });
+    return Promise.race([promise.finally(() => clearTimeout(timer)), deadline]);
+}
+
+async function refreshGeoIpIfDue(hasFreshWindowsFix) {
     try {
-        let due = force;
-        const exists = fs.existsSync(WIFI_FP_PATH);
-        if (!due) {
-            const stat = exists ? fs.statSync(WIFI_FP_PATH) : null;
-            due = !stat || (Date.now() - stat.mtimeMs > WIFI_FP_MAX_AGE_MS);
+        if (hasFreshWindowsFix) return; // Windows Location is primary — no geo-IP call needed
+        // Throttle off a SEPARATE attempt marker (NOT the data file): a run of failures must
+        // not keep the DATA looking fresh, which would resend a stale city forever. Due =
+        // the attempt marker is missing or older than the TTL.
+        const stat = fs.existsSync(GEOIP_ATTEMPT_PATH) ? fs.statSync(GEOIP_ATTEMPT_PATH) : null;
+        if (stat && Date.now() - stat.mtimeMs <= GEOIP_TTL_MS) return;
+        // Stamp the attempt BEFORE the request (mirrors reassertHardeningIfDue): a down /
+        // rate-limited service is retried ~every TTL, never every 2-min poll.
+        try { fs.writeFileSync(GEOIP_ATTEMPT_PATH, new Date().toISOString(), 'utf-8'); } catch (e) {}
+        for (const provider of GEOIP_PROVIDERS) {
+            try {
+                // Bound the whole call absolutely (getText's timeout is inactivity-only), and
+                // reject an implausibly large body before parsing.
+                const raw = await withDeadline(getText(provider.url, 8000), 10000);
+                if (typeof raw !== 'string' || raw.length > 65536) continue;
+                const picked = provider.pick(JSON.parse(raw));
+                const lat = typeof picked.lat === 'number' ? picked.lat : parseFloat(picked.lat);
+                const lng = typeof picked.lng === 'number' ? picked.lng : parseFloat(picked.lng);
+                if (Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180) {
+                    fs.writeFileSync(GEOIP_PATH, JSON.stringify({
+                        lat, lng,
+                        city: typeof picked.city === 'string' ? picked.city.slice(0, 80) : null,
+                        ip: typeof picked.ip === 'string' ? picked.ip.slice(0, 45) : null,
+                        at: new Date().toISOString(),
+                    }), 'utf-8');
+                    return; // got a fix — done, don't hit the secondary
+                }
+            } catch (e) {
+                // this provider failed (429 / down / slow / parse) — fall through to the next
+            }
         }
-        if (!due) return;
-        // Throttle BEFORE scanning (same discipline as reassertHardeningIfDue) so a FAILED
-        // scan does NOT re-run the 15 s probe on every 2-min poll. If a cache exists we just
-        // move its mtime (its last-good CONTENT + scan `at` are preserved; the hub's TTL
-        // reads the content's `at`, not the mtime, so a stale fingerprint still ages out).
-        // If NONE exists yet — the very first scan, which could keep failing — we write an
-        // EMPTY placeholder: readWifiFingerprint returns null for it (never sent), but its
-        // mtime now throttles the retry to ~hourly instead of every poll.
-        try {
-          if (exists) { const t = new Date(); fs.utimesSync(WIFI_FP_PATH, t, t); }
-          else { fs.writeFileSync(WIFI_FP_PATH, JSON.stringify({ bssids: [], at: new Date().toISOString() }), 'utf-8'); }
-        } catch (e) {}
-        const out = require('child_process').execFileSync(
-            'powershell',
-            ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', GET_WIFI_FP_PS],
-            { timeout: 15000, encoding: 'utf-8' }
-        );
-        let parsed = null;
-        try { parsed = JSON.parse(out.trim()); } catch (e) { /* unparseable → keep last good */ }
-        if (parsed && Array.isArray(parsed.bssids) && parsed.bssids.length > 0) {
-            // Cap the set: a fingerprint needs the visible APs, not an unbounded list.
-            const bssids = parsed.bssids.filter((b) => typeof b === 'string').slice(0, 40);
-            fs.writeFileSync(
-                WIFI_FP_PATH,
-                JSON.stringify({ bssids, at: new Date().toISOString() }),
-                'utf-8'
-            );
-        }
-        // A no-wifi / no-aps / probe error result carries no bssids → leave the last
-        // good fingerprint untouched.
+        // All providers failed → leave the last-good data untouched (readGeoIp ages it out).
     } catch (e) {
-        /* best-effort — a scan failure must never affect the poll */
+        /* best-effort — a geo-IP failure must never affect the poll */
     }
 }
 
@@ -549,14 +570,19 @@ function readLocation() {
     }
 }
 
-// Plan 0017: the latest Wi-Fi fingerprint, or null. Same shape discipline as
-// readLocation — only return a well-formed non-empty set.
-function readWifiFingerprint() {
+// Plan 0018: the latest geo-IP fix, or null. Same shape discipline as readLocation —
+// only return a well-formed reading (the placeholder written to throttle a failing
+// service has no lat/lng, so it's correctly rejected here and never sent).
+function readGeoIp() {
     try {
-        if (!fs.existsSync(WIFI_FP_PATH)) return null;
-        const v = JSON.parse(fs.readFileSync(WIFI_FP_PATH, 'utf-8'));
-        if (v && Array.isArray(v.bssids) && v.bssids.length > 0) return v;
-        return null;
+        if (!fs.existsSync(GEOIP_PATH)) return null;
+        const v = JSON.parse(fs.readFileSync(GEOIP_PATH, 'utf-8'));
+        if (!v || typeof v.lat !== 'number' || typeof v.lng !== 'number') return null;
+        // Freshness gate: a fix older than the max age is NOT sent — so a laptop that moved
+        // while both providers were down never keeps reporting its old city as current.
+        const t = v.at ? Date.parse(v.at) : NaN;
+        if (!Number.isFinite(t) || Date.now() - t > GEOIP_MAX_AGE_MS) return null;
+        return v;
     } catch (e) {
         return null;
     }
@@ -1134,22 +1160,24 @@ async function main() {
     // last cycle), then attach the latest fix if we have one.
     const locateForced = fs.existsSync(LOCATE_PENDING_PATH);
     refreshLocationIfDue(locateForced);
-    refreshWifiFingerprintIfDue(locateForced); // plan 0017: automatic fallback source
     if (locateForced) { try { fs.unlinkSync(LOCATE_PENDING_PATH); } catch (e) {} }
     const location = readLocation();
-    // Plan 0017: only attach a FRESH Windows fix. When Location is off, GetLocation
+    // Plan 0017/0018: only attach a FRESH Windows fix. When Location is off, GetLocation
     // fails and location.json keeps its last good fix — attaching it forever would keep
-    // the hub on (stale) Windows and the Wi-Fi fallback would never fire, so a moved
+    // the hub on (stale) Windows and the geo-IP fallback would never fire, so a moved
     // laptop could never read as "out". Once the fix ages past the TTL we drop it,
-    // body.location goes absent, and the hub falls back to the fresh fingerprint.
-    if (location && location.at && Date.now() - new Date(location.at).getTime() < LOCATION_ATTACH_TTL_MS) {
-      body.location = location;
+    // body.location goes absent, and the hub falls back to geo-IP.
+    const hasFreshWindows = !!(location && location.at && Date.now() - new Date(location.at).getTime() < LOCATION_ATTACH_TTL_MS);
+    if (hasFreshWindows) body.location = location;
+    // Plan 0018: geo-IP is the fallback, sent ONLY when there's no fresh Windows fix
+    // (Location off). Refreshed here (direct GET, cached) and attached additively as
+    // `body.geoip`. An old hub simply ignores the field; the new hub uses it, coarsely,
+    // only when `body.location` is absent — Windows never clashes with geo-IP.
+    await refreshGeoIpIfDue(hasFreshWindows);
+    if (!hasFreshWindows) {
+        const geoip = readGeoIp();
+        if (geoip) body.geoip = geoip;
     }
-    // Plan 0017: the Wi-Fi fingerprint rides along on EVERY poll (additive to the
-    // cross-repo contract). The hub uses it only when there's no `location` fix, and
-    // to build the post's reference set. An old hub simply ignores the field.
-    const wifiFingerprint = readWifiFingerprint();
-    if (wifiFingerprint) body.wifi_fingerprint = wifiFingerprint;
 
     // Tamper events (uninstall attempt, printer retention attempt, etc.) since the last upload.
     // reassertHardeningIfDue() ran at the TOP of main() (above the not-enrolled guard); its
